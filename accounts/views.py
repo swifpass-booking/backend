@@ -123,3 +123,12 @@ def me(request):
     if not user:
         return error(401, "unauthorised", "Account no longer exists.")
     return JsonResponse({"user": user.to_public_dict()})
+
+
+@require_http_methods(["GET"])
+@require_auth
+def preferences(request):
+    user = User.objects.filter(id=request.user_id).first()
+    if not user:
+        return error(401, "unauthorised", "Account no longer exists.")
+    return JsonResponse(user.preferences or {})

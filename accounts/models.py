@@ -24,6 +24,9 @@ class User(models.Model):
     full_name = models.CharField(max_length=255)
     locale = models.CharField(max_length=10, default="en-NP")
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="traveller")
+    # Free-form, e.g. {"preferredModes": ["bus"], "homeCity": "Kathmandu"}.
+    # Read by the agent's get_user_preferences tool; nothing writes it yet.
+    preferences = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def set_password(self, raw_password):

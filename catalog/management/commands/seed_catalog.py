@@ -6,7 +6,7 @@ from django.core.management.base import BaseCommand
 
 from catalog.models import InventoryZone, Occurrence, Place, Provider, Service
 
-MOCK_DATA_PATH = settings.BASE_DIR.parent / "frontend" / "src" / "mock-data.json"
+MOCK_DATA_PATH = settings.BASE_DIR.parent / "frontend" / "src" / "lib" / "mock-data.json"
 
 
 class Command(BaseCommand):

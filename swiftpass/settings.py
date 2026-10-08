@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "accounts",
     "catalog",
     "bookings",
+    "carts",
     "adminapi",
     "scanning",
 ]
@@ -68,6 +69,10 @@ CORS_ALLOWED_ORIGINS = [
 # manager — there is no production path in this prototype, so a fixed
 # local constant is fine (see accounts/jwt.py).
 JWT_SECRET = "swiftpass-dev-secret-do-not-use-in-production"
+
+# The voice/text booking concierge lives outside this project, in
+# ../models/agent-project (LangGraph + Ollama, hitting this API over HTTP
+# like any other client — see that project's server.py and README).
 
 ROOT_URLCONF = "swiftpass.urls"
 

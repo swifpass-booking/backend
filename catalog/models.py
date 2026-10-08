@@ -1,5 +1,10 @@
 from django.db import models
 
+# Platform service fee, applied on top of price_minor when quoting an offer or
+# cart line. There's no separate fee schedule per provider yet, so one flat
+# rate stands in for it everywhere fees are computed (search, carts).
+PLATFORM_FEE_RATE = 0.05
+
 
 class Place(models.Model):
     id = models.CharField(primary_key=True, max_length=32)
@@ -10,6 +15,18 @@ class Place(models.Model):
     city = models.CharField(max_length=100)
     country = models.CharField(max_length=5)
     timezone = models.CharField(max_length=50)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "code": self.code,
+            "name": self.name,
+            "nameNe": self.name_ne,
+            "city": self.city,
+            "country": self.country,
+            "timezone": self.timezone,
+        }
 
     def __str__(self):
         return self.name
@@ -22,6 +39,9 @@ class Provider(models.Model):
     modes = models.JSONField(default=list)
     adapter_key = models.CharField(max_length=50)
     is_self_serve = models.BooleanField(default=False)
+
+    def to_dict(self):
+        return {"id": self.id, "displayName": self.display_name, "isSelfServe": self.is_self_serve}
 
     def __str__(self):
         return self.display_name
@@ -61,6 +81,63 @@ class Occurrence(models.Model):
     seats_sold = models.IntegerField(default=0)
     provider_ref = models.CharField(max_length=100, null=True, blank=True)
 
+    def seats_available(self):
+        return max(self.capacity - self.seats_sold, 0)
+
+    def to_offer_dict(self, offer_id=None, quote_ttl_seconds=900):
+        from django.utils import timezone
+
+        service = self.service
+        zones = list(self.zones.all())
+        fees_minor = round(self.base_price_minor * PLATFORM_FEE_RATE)
+
+        details = dict(service.attributes or {})
+        if self.mode == "air":
+            details.setdefault("flightNumber", service.code or "")
+            details.setdefault("aircraft", None)
+            details.setdefault("cabin", "economy")
+            details.setdefault("baggageKg", 20)
+            details.setdefault("stops", 0)
+        elif self.mode == "bus":
+            details.setdefault("coachType", "deluxe")
+            details.setdefault("boardingPoint", service.origin_place.name if service.origin_place else "")
+            details.setdefault("droppingPoint", service.dest_place.name if service.dest_place else "")
+            details.setdefault("amenities", [])
+            details.setdefault("hasAc", True)
+        elif self.mode == "rail":
+            details.setdefault("trainNumber", service.code or "")
+            details.setdefault("coachClass", "general")
+            details.setdefault("platform", None)
+        elif self.mode == "event":
+            details.setdefault("category", "community")
+            details.setdefault("ageRating", None)
+            details.setdefault("language", None)
+            details.setdefault("doorsOpenAt", self.gates_open_at.isoformat() if self.gates_open_at else None)
+
+        return {
+            "offerId": offer_id or f"ofr_{self.id}",
+            "occurrenceId": self.id,
+            "mode": self.mode,
+            "provider": service.provider.to_dict(),
+            "title": service.title,
+            "origin": service.origin_place.to_dict() if service.origin_place else None,
+            "destination": service.dest_place.to_dict() if service.dest_place else None,
+            "venue": service.venue_place.to_dict() if service.venue_place else None,
+            "departsAt": self.departs_at.isoformat(),
+            "arrivesAt": self.arrives_at.isoformat() if self.arrives_at else None,
+            "durationMinutes": (
+                int((self.arrives_at - self.departs_at).total_seconds() // 60) if self.arrives_at else None
+            ),
+            "price": {"amount": self.base_price_minor, "currency": "NPR"},
+            "fees": {"amount": fees_minor, "currency": "NPR"},
+            "seatsAvailable": self.seats_available(),
+            "hasReservedSeating": any(z.is_reserved_seating for z in zones),
+            "zones": [z.to_dict() for z in zones],
+            "rankingReason": [],
+            "details": details,
+            "quoteExpiresAt": (timezone.now() + timezone.timedelta(seconds=quote_ttl_seconds)).isoformat(),
+        }
+
     def __str__(self):
         return f"{self.service.title} @ {self.departs_at.isoformat()}"
 
@@ -73,6 +150,28 @@ class InventoryZone(models.Model):
     price_minor = models.IntegerField()
     capacity = models.IntegerField()
     is_reserved_seating = models.BooleanField(default=False)
+
+    def held_seats(self):
+        # Active (non-expired) holds against this zone. Imported lazily to
+        # avoid a circular import — carts.models imports catalog.models.
+        from django.utils import timezone
+
+        from carts.models import Hold
+
+        return sum(
+            h.qty for h in Hold.objects.filter(zone=self, expires_at__gt=timezone.now())
+        )
+
+    def to_dict(self):
+        available = max(self.capacity - self.held_seats(), 0)
+        return {
+            "id": self.id,
+            "code": self.code,
+            "label": self.label,
+            "price": {"amount": self.price_minor, "currency": "NPR"},
+            "seatsAvailable": available,
+            "isReservedSeating": self.is_reserved_seating,
+        }
 
     def __str__(self):
         return f"{self.occurrence_id}:{self.code}"
