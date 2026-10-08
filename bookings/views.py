@@ -1,9 +1,13 @@
 import json
 import re
+import secrets
+from datetime import timedelta
 
 from django.db import IntegrityError, transaction
 from django.db.models import F
+from django.conf import settings
 from django.http import JsonResponse
+from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -14,9 +18,11 @@ from accounts.throttle import throttle
 from accounts.views import is_valid_email, is_valid_phone
 from catalog.models import PLATFORM_FEE_RATE, Occurrence
 
+from . import gateways
 from .models import Booking, Passenger, Ticket
 
 PAYMENT_METHODS = {"esewa", "khalti", "fonepay", "card"}
+GATEWAY_METHODS = {"esewa", "khalti"}  # real redirect flow on web; other methods stay instant-confirm
 MAX_PASSENGERS = 9
 
 
@@ -31,6 +37,54 @@ def optional_user(request):
         return None
     user_id = decode_token(token)
     return User.objects.filter(id=user_id).first() if user_id else None
+
+
+def _release(booking, new_status="cancelled"):
+    """Give a never-paid booking's seats back."""
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().get(pk=booking.pk)
+        if booking.status != "pending_payment":
+            return
+        booking.status = new_status
+        booking.save(update_fields=["status"])
+        Occurrence.objects.filter(pk=booking.occurrence_id).update(
+            seats_sold=F("seats_sold") - booking.passenger_count
+        )
+
+
+def _release_stale_pending():
+    cutoff = timezone.now() - timedelta(minutes=settings.PENDING_PAYMENT_MINUTES)
+    for b in Booking.objects.filter(status="pending_payment", created_at__lt=cutoff):
+        _release(b)
+
+
+def _start_gateway(booking):
+    if booking.payment_method == "esewa":
+        ref = f"{booking.reference}-{secrets.token_hex(3)}"
+        info = gateways.esewa_start(booking, ref)
+    else:
+        info = gateways.khalti_start(booking)
+        ref = info["pidx"]
+    booking.payment_ref = ref
+    booking.save(update_fields=["payment_ref"])
+    return info
+
+
+def _issue_tickets(booking):
+    for passenger in booking.passengers.all():
+        Ticket.objects.get_or_create(
+            passenger=passenger, defaults={"booking": booking, "occurrence": booking.occurrence}
+        )
+
+
+def _with_gateway(booking, status):
+    body = booking.to_dict()
+    try:
+        body["gateway"] = _start_gateway(booking)
+    except gateways.GatewayError as e:
+        _release(booking)
+        return error(502, "gateway_unavailable", str(e))
+    return JsonResponse(body, status=status)
 
 
 @csrf_exempt
@@ -76,7 +130,12 @@ def create_booking(request):
     if idem:
         existing = Booking.objects.filter(idempotency_key=idem).first()
         if existing:
+            if existing.status == "pending_payment":
+                return _with_gateway(existing, 200)
             return JsonResponse(existing.to_dict(), status=200)
+
+    _release_stale_pending()
+    via_gateway = payment in GATEWAY_METHODS and request.headers.get("X-Client") != "mobile"
 
     try:
         with transaction.atomic():
@@ -118,10 +177,12 @@ def create_booking(request):
                 currency="NPR",
                 created_via="mobile" if request.headers.get("X-Client") == "mobile" else "web",
                 idempotency_key=idem,
+                status="pending_payment" if via_gateway else "confirmed",
             )
             for i, name in enumerate(names):
                 passenger = Passenger.objects.create(booking=booking, full_name=name.strip(), is_lead=(i == 0), order=i)
-                Ticket.objects.create(booking=booking, passenger=passenger, occurrence=occurrence)
+                if not via_gateway:
+                    Ticket.objects.create(booking=booking, passenger=passenger, occurrence=occurrence)
 
             Occurrence.objects.filter(pk=occurrence.pk).update(seats_sold=F("seats_sold") + n)
     except IntegrityError:
@@ -131,4 +192,86 @@ def create_booking(request):
             return JsonResponse(existing.to_dict(), status=200)
         raise
 
+    if via_gateway:
+        return _with_gateway(booking, 201)
     return JsonResponse(booking.to_dict(), status=201)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@throttle("payment-verify", limit=30, window=600)
+def verify_payment(request):
+    """Called by the frontend when the gateway sends the traveller back. Re-checks the payment with
+    the gateway server-to-server, then confirms the booking and issues tickets (idempotent)."""
+    try:
+        body = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return error(400, "validation_failed", "Malformed request body.")
+    provider = body.get("provider")
+
+    try:
+        if provider == "esewa":
+            if body.get("failed") and not body.get("data"):
+                return _fail_by_ref(body.get("ref"), "eSewa payment was cancelled or failed.")
+            ref, paid_minor = gateways.esewa_check(str(body.get("data") or ""))
+        elif provider == "khalti":
+            ref = str(body.get("pidx") or "")
+            if not ref:
+                return error(400, "validation_failed", "Missing Khalti payment id.")
+            status, paid_minor = gateways.khalti_check(ref)
+            if status != "Completed":
+                if status in ("User canceled", "Expired", "Refunded"):
+                    return _fail_by_ref(ref, f"Khalti payment {status.lower()}.")
+                return error(402, "payment_pending", f"Khalti reports the payment as {status}.")
+        else:
+            return error(400, "validation_failed", "Unknown payment provider.")
+    except gateways.GatewayError as e:
+        return error(402, "payment_not_verified", str(e))
+
+    booking = Booking.objects.filter(payment_ref=ref).first()
+    if not booking:
+        return error(404, "not_found", "No booking matches that payment.")
+    if booking.status == "confirmed":
+        return JsonResponse(booking.to_dict())
+    if booking.status != "pending_payment":
+        return error(409, "booking_closed", "That booking expired before payment arrived. Contact support for a refund.")
+    if paid_minor != booking.total_minor:
+        return error(409, "amount_mismatch", "The paid amount does not match the booking total.")
+
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().get(pk=booking.pk)
+        if booking.status == "pending_payment":
+            booking.status = "confirmed"
+            booking.paid_at = timezone.now()
+            booking.save(update_fields=["status", "paid_at"])
+            _issue_tickets(booking)
+    return JsonResponse(booking.to_dict())
+
+
+def _fail_by_ref(ref, message):
+    booking = Booking.objects.filter(payment_ref=ref).first() if ref else None
+    if booking:
+        _release(booking)
+    return error(402, "payment_failed", message)
+
+
+@require_http_methods(["GET"])
+def my_bookings(request):
+    """GET /v1/bookings/mine — the signed-in traveller's bookings, upcoming first."""
+    user = optional_user(request)
+    if not user:
+        return error(401, "unauthorised", "Sign in to see your bookings.")
+    _release_stale_pending()  # expire abandoned gateway payments so they don't linger as "pending"
+    now = timezone.now()
+    rows = list(
+        Booking.objects.filter(user=user, status__in=["confirmed", "pending_payment"])
+        .select_related("occurrence")
+        .prefetch_related("passengers", "tickets")[:50]
+    )
+    rows.sort(key=lambda b: (b.departs_at is None or b.departs_at < now, b.departs_at or now))
+    out = []
+    for b in rows:
+        d = b.to_dict()
+        d["upcoming"] = bool(b.departs_at and b.departs_at >= now)
+        out.append(d)
+    return JsonResponse({"bookings": out})

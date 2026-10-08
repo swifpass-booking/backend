@@ -165,3 +165,17 @@ MAILERS = {
         "BACKEND": "django.core.mail.backends.console.EmailBackend",
     },
 }
+
+
+# --- Payment gateways (sandbox / test mode) ---------------------------------
+# eSewa publishes shared test credentials, so they default in local dev.
+# Khalti has no shared test key: create a sandbox merchant at https://test-admin.khalti.com
+# and export KHALTI_SECRET_KEY (the "Live secret key" shown in that sandbox dashboard).
+FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "https://localhost:5173").rstrip("/")
+ESEWA_PRODUCT_CODE = os.environ.get("ESEWA_PRODUCT_CODE", "EPAYTEST" if DEBUG else "")
+ESEWA_SECRET_KEY = os.environ.get("ESEWA_SECRET_KEY", "8gBm/:&EnhH.1/q" if DEBUG else "")
+ESEWA_FORM_URL = os.environ.get("ESEWA_FORM_URL", "https://rc-epay.esewa.com.np/api/epay/main/v2/form")
+ESEWA_STATUS_URL = os.environ.get("ESEWA_STATUS_URL", "https://rc.esewa.com.np/api/epay/transaction/status/")
+KHALTI_SECRET_KEY = os.environ.get("KHALTI_SECRET_KEY", "")
+KHALTI_BASE_URL = os.environ.get("KHALTI_BASE_URL", "https://dev.khalti.com/api/v2")
+PENDING_PAYMENT_MINUTES = 15

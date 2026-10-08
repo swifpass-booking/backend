@@ -30,6 +30,7 @@ def new_ticket_code():
 
 class Booking(models.Model):
     STATUS_CHOICES = [
+        ("pending_payment", "Pending payment"),
         ("confirmed", "Confirmed"),
         ("cancelled", "Cancelled"),
         ("refunded", "Refunded"),
@@ -62,6 +63,9 @@ class Booking(models.Model):
     currency = models.CharField(max_length=3, default="NPR")
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="confirmed")
+    # Gateway session id: eSewa transaction_uuid or Khalti pidx (set while payment is pending).
+    payment_ref = models.CharField(max_length=100, null=True, blank=True, db_index=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
     created_via = models.CharField(max_length=10, default="web")
     # "<user id or anon>:<client Idempotency-Key>" — a retried POST returns the original booking.
     idempotency_key = models.CharField(max_length=140, unique=True, null=True, blank=True, editable=False)
@@ -79,6 +83,7 @@ class Booking(models.Model):
             "reference": self.reference,
             "status": self.status,
             "offerId": self.offer_id,
+            "occurrenceId": self.occurrence_id,
             "mode": self.mode,
             "title": self.title,
             "providerName": self.provider_name,

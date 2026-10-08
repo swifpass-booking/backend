@@ -8,6 +8,8 @@ from catalog.models import InventoryZone, Occurrence, Place, Provider, Service
 
 MOCK_DATA_PATH = settings.BASE_DIR.parent / "frontend" / "src" / "lib" / "mock-data.json"
 
+from catalog.geo import CITY_COORDS
+
 
 class Command(BaseCommand):
     help = "Load places/providers/services/occurrences/zones from the frontend's mock-data.json into the database."
@@ -29,6 +31,8 @@ class Command(BaseCommand):
                     city=p["city"],
                     country=p["country"],
                     timezone=p["timezone"],
+                    latitude=CITY_COORDS.get(p["city"], (None, None))[0],
+                    longitude=CITY_COORDS.get(p["city"], (None, None))[1],
                 ),
             )
 

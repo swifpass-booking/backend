@@ -15,6 +15,8 @@ class Place(models.Model):
     city = models.CharField(max_length=100)
     country = models.CharField(max_length=5)
     timezone = models.CharField(max_length=50)
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
 
     def to_dict(self):
         return {
@@ -26,6 +28,8 @@ class Place(models.Model):
             "city": self.city,
             "country": self.country,
             "timezone": self.timezone,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
         }
 
     def __str__(self):
@@ -175,3 +179,29 @@ class InventoryZone(models.Model):
 
     def __str__(self):
         return f"{self.occurrence_id}:{self.code}"
+
+
+class VehiclePosition(models.Model):
+    """Latest reported GPS fix for the vehicle running one occurrence. Pushed by the operator's
+    tracker/driver app via POST /v1/occurrences/<id>/tracking. With no fix on file, the tracking
+    endpoint estimates the position from the timetable and labels it "simulated"."""
+
+    occurrence = models.OneToOneField(Occurrence, on_delete=models.CASCADE, related_name="vehicle_position")
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    speed_kmh = models.FloatField(null=True, blank=True)
+    heading = models.FloatField(null=True, blank=True)
+    updated_at = models.DateTimeField()
+
+    def __str__(self):
+        return f"{self.occurrence_id} @ {self.latitude:.4f},{self.longitude:.4f}"
+
+
+class RouteCache(models.Model):
+    """Road geometry between two places, fetched once from OSRM and reused for every trip on that route."""
+
+    key = models.CharField(primary_key=True, max_length=80)  # "lat,lng>lat,lng", 4 dp
+    geometry = models.JSONField()  # [[lat, lng], ...], evenly spaced by distance
+    distance_km = models.FloatField()
+    duration_min = models.FloatField()
+    fetched_at = models.DateTimeField(auto_now_add=True)
