@@ -1,4 +1,3 @@
-import random
 import secrets
 import uuid
 
@@ -15,7 +14,7 @@ def new_booking_id():
 
 
 def new_reference():
-    return "SWP-" + "".join(random.choice(REFERENCE_ALPHABET) for _ in range(6))
+    return "SWP-" + "".join(secrets.choice(REFERENCE_ALPHABET) for _ in range(6))
 
 
 def new_ticket_id():
@@ -64,6 +63,8 @@ class Booking(models.Model):
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="confirmed")
     created_via = models.CharField(max_length=10, default="web")
+    # "<user id or anon>:<client Idempotency-Key>" — a retried POST returns the original booking.
+    idempotency_key = models.CharField(max_length=140, unique=True, null=True, blank=True, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

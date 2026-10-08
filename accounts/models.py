@@ -27,6 +27,8 @@ class User(models.Model):
     # Free-form, e.g. {"preferredModes": ["bus"], "homeCity": "Kathmandu"}.
     # Read by the agent's get_user_preferences tool; nothing writes it yet.
     preferences = models.JSONField(default=dict, blank=True)
+    # Bumped on logout / password change; tokens carrying an older value are rejected.
+    token_version = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def set_password(self, raw_password):

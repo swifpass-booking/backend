@@ -10,22 +10,41 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
+# Configuration comes from the environment. Local dev: export DJANGO_DEBUG=1
+# (see .env.example) — that enables throwaway fallback secrets. Without it,
+# DJANGO_SECRET_KEY and JWT_SECRET are required and startup fails if missing.
+DEBUG = os.environ.get("DJANGO_DEBUG") == "1"
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-l%s9+8acouk44n!m6wb=bc3cxv3u1do$(7n!ho^#p6q!v)_a3h"
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+def _secret(name, dev_fallback):
+    value = os.environ.get(name)
+    if value:
+        return value
+    if DEBUG:
+        return dev_fallback
+    raise RuntimeError(f"{name} must be set (or DJANGO_DEBUG=1 for local development).")
 
-ALLOWED_HOSTS = []
+
+SECRET_KEY = _secret("DJANGO_SECRET_KEY", "dev-only-django-secret-key-not-for-production")
+JWT_SECRET = _secret("JWT_SECRET", "dev-only-jwt-secret-key-not-for-production-use!")
+
+ALLOWED_HOSTS = [h for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h]
+if DEBUG and not ALLOWED_HOSTS:
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1", "10.0.2.2"]
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_CONTENT_TYPE_NOSNIFF = True
 
 
 # Application definition
@@ -61,14 +80,10 @@ MIDDLEWARE = [
 # The React dev server (frontend/) proxies /v1 to this backend, so CORS only
 # matters when the frontend is opened directly at its own origin.
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
+    o for o in os.environ.get(
+        "CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",") if o
 ]
-
-# Dev-only signing secret. A real deployment reads this from env/secret
-# manager — there is no production path in this prototype, so a fixed
-# local constant is fine (see accounts/jwt.py).
-JWT_SECRET = "swiftpass-dev-secret-do-not-use-in-production"
 
 # The voice/text booking concierge lives outside this project, in
 # ../models/agent-project (LangGraph + Ollama, hitting this API over HTTP

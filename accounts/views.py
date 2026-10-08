@@ -2,13 +2,17 @@ import functools
 import json
 import re
 
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.db.models import Q
+from django.db.models import F
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from .jwt import decode_token, issue_token
 from .models import User
+from .throttle import throttle
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 PHONE_RE = re.compile(r"^\+?\d{7,15}$")
@@ -30,9 +34,15 @@ def parse_body(request):
     if not request.body:
         return {}
     try:
-        return json.loads(request.body)
+        body = json.loads(request.body)
     except json.JSONDecodeError:
         return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _login_key(request):
+    ident = parse_body(request).get("identifier")
+    return ident.strip().lower()[:100] if isinstance(ident, str) else ""
 
 
 def require_auth(view):
@@ -66,10 +76,12 @@ def require_admin(view):
 
 @csrf_exempt
 @require_http_methods(["POST"])
+@throttle("register", limit=10, window=3600)
 def register(request):
     body = parse_body(request)
     full_name = body.get("fullName")
-    identifier = (body.get("identifier") or "").strip()
+    identifier = body.get("identifier")
+    identifier = identifier.strip() if isinstance(identifier, str) else ""
     password = body.get("password")
 
     if not full_name or not isinstance(full_name, str) or len(full_name.strip()) < 2:
@@ -91,18 +103,25 @@ def register(request):
         phone_e164=identifier if is_phone else None,
         full_name=full_name.strip(),
     )
+    try:
+        validate_password(password, user=user)
+    except ValidationError as e:
+        return error(400, "validation_failed", " ".join(e.messages))
     user.set_password(password)
     user.save()
 
-    token = issue_token(user.id)
+    token = issue_token(user)
     return JsonResponse({"token": token, "user": user.to_public_dict()}, status=201)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
+@throttle("login-ip", limit=30, window=900)
+@throttle("login-id", limit=5, window=900, key_func=_login_key)
 def login(request):
     body = parse_body(request)
-    identifier = (body.get("identifier") or "").strip()
+    identifier = body.get("identifier")
+    identifier = identifier.strip() if isinstance(identifier, str) else ""
     password = body.get("password")
 
     if not identifier or not password:
@@ -112,8 +131,17 @@ def login(request):
     if not user or not user.check_password(password):
         return error(401, "unauthorised", "Incorrect email/phone or password.")
 
-    token = issue_token(user.id)
+    token = issue_token(user)
     return JsonResponse({"token": token, "user": user.to_public_dict()})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_auth
+def logout(request):
+    """Revokes every token issued to this user so far."""
+    User.objects.filter(id=request.user_id).update(token_version=F("token_version") + 1)
+    return JsonResponse({"ok": True})
 
 
 @require_http_methods(["GET"])

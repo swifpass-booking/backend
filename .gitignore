@@ -1,7 +1,6 @@
 __pycache__/
 *.pyc
 db.sqlite3
-legacy_node_server/swiftpass.db
 
 # Virtualenv / env files
 venv/
