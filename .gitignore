@@ -7,3 +7,4 @@ legacy_node_server/swiftpass.db
 venv/
 .venv/
 .env
+db.sqlite3.bak
