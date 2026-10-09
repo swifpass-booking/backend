@@ -105,12 +105,13 @@ class Passenger(models.Model):
     full_name = models.CharField(max_length=255)
     is_lead = models.BooleanField(default=False)
     order = models.PositiveSmallIntegerField(default=0)
+    seat_label = models.CharField(max_length=12, null=True, blank=True)
 
     class Meta:
         ordering = ["order"]
 
     def to_dict(self):
-        return {"fullName": self.full_name, "isLead": self.is_lead}
+        return {"fullName": self.full_name, "isLead": self.is_lead, "seatLabel": self.seat_label}
 
     def __str__(self):
         return self.full_name
@@ -130,7 +131,7 @@ class Ticket(models.Model):
     occurrence = models.ForeignKey(
         Occurrence, null=True, blank=True, on_delete=models.SET_NULL, related_name="tickets"
     )
-    seat_label = models.CharField(max_length=10, null=True, blank=True)
+    seat_label = models.CharField(max_length=12, null=True, blank=True)
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="issued")
     redeemed_at = models.DateTimeField(null=True, blank=True)
     redeemed_gate = models.CharField(max_length=50, null=True, blank=True)

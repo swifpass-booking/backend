@@ -135,7 +135,7 @@ class Occurrence(models.Model):
             "price": {"amount": self.base_price_minor, "currency": "NPR"},
             "fees": {"amount": fees_minor, "currency": "NPR"},
             "seatsAvailable": self.seats_available(),
-            "hasReservedSeating": any(z.is_reserved_seating for z in zones),
+            "hasReservedSeating": any(z.is_seated() for z in zones),
             "zones": [z.to_dict() for z in zones],
             "rankingReason": [],
             "details": details,
@@ -154,6 +154,12 @@ class InventoryZone(models.Model):
     price_minor = models.IntegerField()
     capacity = models.IntegerField()
     is_reserved_seating = models.BooleanField(default=False)
+
+    def is_seated(self):
+        """Reserved seating flag AND small enough that travellers can pick a seat (see catalog.seating)."""
+        from .seating import zone_is_seated
+
+        return self.is_reserved_seating and zone_is_seated(self.occurrence, self)
 
     def held_seats(self):
         # Active (non-expired) holds against this zone. Imported lazily to
@@ -174,7 +180,7 @@ class InventoryZone(models.Model):
             "label": self.label,
             "price": {"amount": self.price_minor, "currency": "NPR"},
             "seatsAvailable": available,
-            "isReservedSeating": self.is_reserved_seating,
+            "isReservedSeating": self.is_seated(),
         }
 
     def __str__(self):

@@ -16,6 +16,7 @@ from accounts.jwt import decode_token
 from accounts.models import User
 from accounts.throttle import throttle
 from accounts.views import is_valid_email, is_valid_phone
+from catalog import seating
 from catalog.models import PLATFORM_FEE_RATE, Occurrence
 
 from . import gateways
@@ -73,7 +74,7 @@ def _start_gateway(booking):
 def _issue_tickets(booking):
     for passenger in booking.passengers.all():
         Ticket.objects.get_or_create(
-            passenger=passenger, defaults={"booking": booking, "occurrence": booking.occurrence}
+            passenger=passenger, defaults={"booking": booking, "occurrence": booking.occurrence, "seat_label": passenger.seat_label}
         )
 
 
@@ -106,6 +107,7 @@ def create_booking(request):
     email = body.get("email") or None
     payment = body.get("payment")
     total = body.get("total")
+    seats = body.get("seats")
 
     if not isinstance(offer, dict) or not isinstance(offer.get("occurrenceId"), str):
         return error(400, "validation_failed", "An offer is required.")
@@ -121,6 +123,10 @@ def create_booking(request):
         return error(400, "validation_failed", "Enter a valid email address.")
     if payment not in PAYMENT_METHODS:
         return error(400, "validation_failed", "Choose a valid payment method.")
+    if seats is not None and (
+        not isinstance(seats, list) or not all(isinstance(x, str) and 0 < len(x) <= 12 for x in seats)
+    ):
+        return error(400, "validation_failed", "seats must be a list of seat labels.")
     if not isinstance(total, dict) or not isinstance(total.get("amount"), int):
         return error(400, "validation_failed", "A total amount is required.")
 
@@ -153,9 +159,28 @@ def create_booking(request):
             if occurrence.seats_available() < n:
                 return error(409, "seat_unavailable", "Not enough seats left.")
 
-            unit_price = occurrence.base_price_minor
-            unit_fee = round(unit_price * PLATFORM_FEE_RATE)
-            subtotal, fees = unit_price * n, unit_fee * n
+            sections = seating.build_sections(occurrence)
+            chosen = list(seats or [])
+            if sections:
+                if not chosen:
+                    chosen = seating.pick_default(occurrence, n) or []
+                    if len(chosen) != n:
+                        return error(409, "seat_unavailable", "Not enough seats left together.")
+                if len(chosen) != n or len(set(chosen)) != n:
+                    return error(400, "validation_failed", "Choose one distinct seat per traveller.")
+                index = seating.seat_index(sections)
+                taken = seating.taken_labels(occurrence, sections)
+                for label in chosen:
+                    if label not in index:
+                        return error(400, "validation_failed", f"Seat {label} does not exist on this trip.")
+                    if label in taken:
+                        return error(409, "seat_unavailable", f"Seat {label} was just taken. Pick another seat.")
+                unit_prices = [index[label][0]["price"]["amount"] for label in chosen]
+            else:
+                chosen = []
+                unit_prices = [occurrence.base_price_minor] * n
+            fee_list = [round(p * PLATFORM_FEE_RATE) for p in unit_prices]
+            subtotal, fees = sum(unit_prices), sum(fee_list)
             if total["amount"] != subtotal + fees:
                 return error(409, "price_changed", "The price changed. Review the new total and try again.")
 
@@ -180,9 +205,12 @@ def create_booking(request):
                 status="pending_payment" if via_gateway else "confirmed",
             )
             for i, name in enumerate(names):
-                passenger = Passenger.objects.create(booking=booking, full_name=name.strip(), is_lead=(i == 0), order=i)
+                seat = chosen[i] if chosen else None
+                passenger = Passenger.objects.create(
+                    booking=booking, full_name=name.strip(), is_lead=(i == 0), order=i, seat_label=seat
+                )
                 if not via_gateway:
-                    Ticket.objects.create(booking=booking, passenger=passenger, occurrence=occurrence)
+                    Ticket.objects.create(booking=booking, passenger=passenger, occurrence=occurrence, seat_label=seat)
 
             Occurrence.objects.filter(pk=occurrence.pk).update(seats_sold=F("seats_sold") + n)
     except IntegrityError:

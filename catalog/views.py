@@ -93,38 +93,22 @@ def _place_matches(place, term):
 
 @require_http_methods(["GET"])
 def seatmap(request, occurrence_id):
-    occurrence = Occurrence.objects.filter(id=occurrence_id).first()
+    from . import seating
+
+    occurrence = (
+        Occurrence.objects.select_related("service").filter(id=occurrence_id).first()
+    )
     if not occurrence:
         return error(404, "validation_failed", "No such occurrence.")
 
-    zones = InventoryZone.objects.filter(occurrence=occurrence)
-    has_reserved = any(z.is_reserved_seating for z in zones)
-
-    seats = []
-    if has_reserved:
-        for zone in zones:
-            if not zone.is_reserved_seating:
-                continue
-            held = zone.held_seats()
-            # Individual seat identities aren't tracked pre-cart — only how many
-            # of this zone's seats are claimed by active holds — so seats are
-            # synthesized labels split between 'held' and 'available'.
-            for i in range(zone.capacity):
-                seats.append(
-                    {
-                        "label": f"{zone.code}-{i + 1}",
-                        "zoneId": zone.id,
-                        "state": "held" if i < held else "available",
-                        "price": {"amount": zone.price_minor, "currency": "NPR"},
-                        "attributes": [],
-                    }
-                )
-
+    sections, seats = seating.seatmap(occurrence)
     return JsonResponse(
         {
             "occurrenceId": occurrence.id,
-            "isReservedSeating": has_reserved,
-            "layout": {"rows": 0, "columns": [], "aisleAfter": []},
+            "mode": occurrence.mode,
+            "isReservedSeating": bool(sections),
+            "layout": {"rows": sum(len(s["rows"]) for s in sections), "columns": [], "aisleAfter": []},
+            "sections": sections,
             "seats": seats,
             "snapshotAt": timezone.now().isoformat(),
         }

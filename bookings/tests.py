@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from accounts.models import User
-from catalog.models import Occurrence, Provider, Service
+from catalog.models import InventoryZone, Occurrence, Provider, Service
 
 from .models import Booking
 
@@ -58,6 +58,57 @@ class SecurityTests(TestCase):
         self.assertEqual(Booking.objects.count(), 1)
         self.occ.refresh_from_db()
         self.assertEqual(self.occ.seats_sold, 1)
+
+
+class SeatSelectionTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        provider = Provider.objects.create(id="p1", legal_name="P", display_name="P", adapter_key="x")
+        service = Service.objects.create(
+            id="s1", provider=provider, mode="bus", title="KTM-PKR", attributes={"coachType": "deluxe"}
+        )
+        self.occ = Occurrence.objects.create(
+            id="occ_1", service=service, mode="bus", departs_at=timezone.now() + timezone.timedelta(days=1),
+            base_price_minor=100000, capacity=8,
+        )
+        InventoryZone.objects.create(
+            id="z1", occurrence=self.occ, code="DELUXE", label="Deluxe", price_minor=100000, capacity=8,
+            is_reserved_seating=True,
+        )
+
+    def _book(self, seats, n=None, total=None):
+        n = n or len(seats or [1])
+        body = {
+            "offer": {"occurrenceId": "occ_1"}, "names": ["Asha Rai"] * n, "phone": "9800000000",
+            "payment": "card", "total": {"amount": 105000 * n if total is None else total, "currency": "NPR"},
+        }
+        if seats is not None:
+            body["seats"] = seats
+        return self.client.post("/v1/bookings", data=json.dumps(body), content_type="application/json")
+
+    def test_seatmap_has_capacity_seats(self):
+        data = self.client.get("/v1/occurrences/occ_1/seatmap").json()
+        self.assertTrue(data["isReservedSeating"])
+        self.assertEqual(len(data["seats"]), 8)
+        self.assertEqual(data["seats"][0]["label"], "1A")
+
+    def test_chosen_seat_is_stored_and_blocks_others(self):
+        res = self._book(["2C"])
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["tickets"][0]["seatLabel"], "2C")
+        self.assertEqual(self._book(["2C"]).status_code, 409)
+        seats = {s["label"]: s["state"] for s in self.client.get("/v1/occurrences/occ_1/seatmap").json()["seats"]}
+        self.assertEqual(seats["2C"], "sold")
+
+    def test_unknown_or_duplicate_seat_rejected(self):
+        self.assertEqual(self._book(["9Z"]).status_code, 400)
+        self.assertEqual(self._book(["1A", "1A"], n=2).status_code, 400)
+        self.assertEqual(self._book(["1A"], n=2).status_code, 400)
+
+    def test_no_seats_given_auto_assigns(self):
+        res = self._book(None, n=2)
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(sorted(t["seatLabel"] for t in res.json()["tickets"]), ["1A", "1B"])
 
 
 class AuthTests(TestCase):

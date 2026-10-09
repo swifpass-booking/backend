@@ -39,6 +39,18 @@ def create_hold(request):
     if not isinstance(seat_labels, list) or not all(isinstance(s, str) for s in seat_labels):
         return error(400, "validation_failed", "seatLabels must be a list of strings.")
 
+    if seat_labels:
+        from catalog import seating
+
+        sections = seating.build_sections(occurrence)
+        index = seating.seat_index(sections)
+        taken = seating.taken_labels(occurrence, sections)
+        for label in seat_labels:
+            if label not in index or index[label][0]["zoneId"] != zone.id:
+                return error(400, "validation_failed", f"Seat {label} is not in this zone.")
+            if label in taken:
+                return error(409, "seat_unavailable", f"Seat {label} is not available.")
+
     qty = len(seat_labels) if seat_labels else int(body.get("qty") or 1)
     if qty < 1:
         return error(400, "validation_failed", "qty must be at least 1.")
