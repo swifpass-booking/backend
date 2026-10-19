@@ -1,8 +1,8 @@
 # Render Blueprint: Dashboard → New → Blueprint → pick this repo.
 # The frontend is a static site built from the separate frontend repo; it proxies
-# /v1 to the API so the browser stays same-origin (no CORS, no API URL baked in).
-# If Render gives the API a different hostname than swiftpass-api.onrender.com,
-# update the /v1 rewrite below and FRONTEND_BASE_URL/CSRF to match.
+# /v1 to the API and /agent to the voice concierge, so the browser stays same-origin (no CORS, no API URL baked in).
+# If Render assigns different *.onrender.com hostnames than the names below,
+# update the rewrites and the URL env vars to match.
 databases:
   - name: swiftpass-db
     plan: free
@@ -48,6 +48,32 @@ services:
       - key: KHALTI_SECRET_KEY
         sync: false
 
+  # Voice/text booking concierge (model repo). Groq serves both the LLM and
+  # Whisper STT, so one GROQ_API_KEY (console.groq.com, free) is all it needs.
+  - type: web
+    name: swiftpass-agent
+    runtime: python
+    plan: free
+    region: singapore
+    repo: https://github.com/swifpass-booking/model
+    branch: main
+    rootDir: agent-project
+    buildCommand: pip install -r requirements-server.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips "*"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.9
+      - key: SWIFTPASS_API_BASE_URL
+        value: https://swiftpass-api.onrender.com/v1
+      - key: SWIFTPASS_LLM_PROVIDER
+        value: groq
+      - key: SWIFTPASS_SPEECH_ENGINE
+        value: groq
+      - key: AGENT_CORS_ORIGINS
+        value: https://swiftpass-web.onrender.com
+      - key: GROQ_API_KEY
+        sync: false
+
   - type: web
     name: swiftpass-web
     runtime: static
@@ -59,6 +85,9 @@ services:
       - type: rewrite
         source: /v1/*
         destination: https://swiftpass-api.onrender.com/v1/*
+      - type: rewrite
+        source: /agent/*
+        destination: https://swiftpass-agent.onrender.com/*
       - type: rewrite
         source: /*
         destination: /index.html
