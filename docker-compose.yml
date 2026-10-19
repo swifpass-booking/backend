@@ -1,0 +1,53 @@
+# Full stack for a local preview: `docker compose up --build`, then open http://localhost:8080
+# Expects the sibling repos checked out next to this one (../frontend, ../model).
+# Optional: put GROQ_API_KEY=... in backend/.env to enable the voice/chat agent.
+name: swiftpass
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: swiftpass
+      POSTGRES_USER: swiftpass
+      POSTGRES_PASSWORD: swiftpass
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swiftpass"]
+      interval: 3s
+      retries: 20
+
+  backend:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://swiftpass:swiftpass@db:5432/swiftpass
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-preview-django-secret-change-me}
+      JWT_SECRET: ${JWT_SECRET:-local-preview-jwt-secret-change-me-0123456789}
+      DJANGO_ALLOWED_HOSTS: backend,localhost,127.0.0.1
+      DJANGO_SSL_REDIRECT: "0"  # plain-HTTP preview; real hosts terminate TLS in front
+      FRONTEND_BASE_URL: http://localhost:8080
+      ESEWA_PRODUCT_CODE: EPAYTEST
+      ESEWA_SECRET_KEY: "8gBm/:&EnhH.1/q"
+      ADMIN_IDENTIFIER: ${ADMIN_IDENTIFIER:-admin@swiftpass.dev}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    ports:
+      - "8000:8000"
+
+  agent:
+    build: ../model/agent-project
+    environment:
+      SWIFTPASS_API_BASE_URL: http://backend:8000/v1
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      AGENT_CORS_ORIGINS: http://localhost:8080
+
+  frontend:
+    build: ../frontend
+    depends_on: [backend, agent]
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:
