@@ -1,0 +1,64 @@
+# Render Blueprint: Dashboard → New → Blueprint → pick this repo.
+# The frontend is a static site built from the separate frontend repo; it proxies
+# /v1 to the API so the browser stays same-origin (no CORS, no API URL baked in).
+# If Render gives the API a different hostname than swiftpass-api.onrender.com,
+# update the /v1 rewrite below and FRONTEND_BASE_URL/CSRF to match.
+databases:
+  - name: swiftpass-db
+    plan: free
+    databaseName: swiftpass
+    user: swiftpass
+
+services:
+  - type: web
+    name: swiftpass-api
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput
+    startCommand: bash start.sh
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.9
+      - key: DATABASE_URL
+        fromDatabase:
+          name: swiftpass-db
+          property: connectionString
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET
+        generateValue: true
+      - key: FRONTEND_BASE_URL
+        value: https://swiftpass-web.onrender.com
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://swiftpass-web.onrender.com
+      - key: CSRF_TRUSTED_ORIGINS
+        value: https://swiftpass-api.onrender.com
+      # Bootstraps the first admin on boot; set both in the dashboard.
+      - key: ADMIN_IDENTIFIER
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      # Payments stay in sandbox: eSewa's public test merchant; Khalti needs
+      # a sandbox key from https://test-admin.khalti.com.
+      - key: ESEWA_PRODUCT_CODE
+        value: EPAYTEST
+      - key: ESEWA_SECRET_KEY
+        value: "8gBm/:&EnhH.1/q"
+      - key: KHALTI_SECRET_KEY
+        sync: false
+
+  - type: web
+    name: swiftpass-web
+    runtime: static
+    repo: https://github.com/swifpass-booking/frontend
+    branch: main
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /v1/*
+        destination: https://swiftpass-api.onrender.com/v1/*
+      - type: rewrite
+        source: /*
+        destination: /index.html
