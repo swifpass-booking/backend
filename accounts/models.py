@@ -14,6 +14,8 @@ class User(models.Model):
 
     ROLE_CHOICES = [
         ("traveller", "Traveller"),
+        ("operator_staff", "Operator staff"),
+        ("gate_agent", "Gate agent"),
         ("admin", "Admin"),
     ]
 

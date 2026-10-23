@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from accounts.models import User
-from catalog.models import InventoryZone, Occurrence, Provider, Service
+from catalog.models import InventoryZone, Occurrence, Place, Provider, Service
 
 from .models import Booking
 
@@ -135,3 +135,51 @@ class AuthTests(TestCase):
         codes = [self._post("/v1/auth/login", {"identifier": "a@b.co", "password": "wrong"}).status_code for _ in range(7)]
         self.assertEqual(codes[:5], [401] * 5)
         self.assertEqual(codes[5], 429)
+
+
+class PassportTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        provider = Provider.objects.create(id="p2", legal_name="P", display_name="P", adapter_key="x")
+        ktm = Place.objects.create(id="pl_ktm", kind="airport", code="KTM", name="TIA", city="Kathmandu", country="NP", timezone="Asia/Kathmandu")
+        pkr = Place.objects.create(id="pl_pkr", kind="airport", code="PKR", name="Pokhara", city="Pokhara", country="NP", timezone="Asia/Kathmandu")
+        del_ = Place.objects.create(id="pl_del", kind="airport", code="DEL", name="Indira Gandhi", city="Delhi", country="IN", timezone="Asia/Kolkata")
+        departs = timezone.now() + timezone.timedelta(days=10)
+        for sid, dest in (("s_intl", del_), ("s_dom", pkr)):
+            service = Service.objects.create(id=sid, provider=provider, mode="air", title=sid, origin_place=ktm, dest_place=dest)
+            Occurrence.objects.create(id=f"occ_{sid}", service=service, mode="air", departs_at=departs, base_price_minor=100000, capacity=5)
+        self.good = {
+            "passportNumber": "pa1234567", "nationality": "npl", "birthDate": "1995-01-01",
+            "expiryDate": (departs + timezone.timedelta(days=400)).date().isoformat(), "sex": "M",
+        }
+
+    def _book(self, occ, passports=None):
+        body = {
+            "offer": {"occurrenceId": occ}, "names": ["Asha Rai"], "phone": "9800000000",
+            "payment": "card", "total": {"amount": 105000, "currency": "NPR"},
+        }
+        if passports is not None:
+            body["passports"] = passports
+        return self.client.post("/v1/bookings", data=json.dumps(body), content_type="application/json")
+
+    def test_international_requires_passport(self):
+        res = self._book("occ_s_intl")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.json()["error"]["code"], "passport_required")
+        self.assertEqual(Booking.objects.count(), 0)
+
+    def test_domestic_needs_no_passport(self):
+        self.assertEqual(self._book("occ_s_dom").status_code, 201)
+
+    def test_short_validity_rejected(self):
+        soon = {**self.good, "expiryDate": (timezone.now() + timezone.timedelta(days=30)).date().isoformat()}
+        res = self._book("occ_s_intl", [soon])
+        self.assertEqual(res.json()["error"]["code"], "passport_invalid")
+
+    def test_valid_passport_stored_masked(self):
+        res = self._book("occ_s_intl", [self.good])
+        self.assertEqual(res.status_code, 201)
+        passenger = Booking.objects.get().passengers.get()
+        self.assertEqual(passenger.passport_last4, "4567")
+        self.assertNotIn("PA1234567", passenger.passport_hash)
+        self.assertEqual(res.json()["passengers"][0]["passport"], {"numberLast4": "4567", "nationality": "NPL"})

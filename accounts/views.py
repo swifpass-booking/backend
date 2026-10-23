@@ -74,6 +74,24 @@ def require_admin(view):
     return wrapped
 
 
+STAFF_ROLES = ("admin", "operator_staff", "gate_agent")
+
+
+def require_staff(view):
+    """Admins and operator/gate staff — everyone allowed to scan tickets at a gate."""
+
+    @functools.wraps(view)
+    @require_auth
+    def wrapped(request, *args, **kwargs):
+        user = User.objects.filter(id=request.user_id).first()
+        if not user or user.role not in STAFF_ROLES:
+            return error(403, "unauthorised", "Staff access required.")
+        request.admin_user = user
+        return view(request, *args, **kwargs)
+
+    return wrapped
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @throttle("register", limit=10, window=3600)

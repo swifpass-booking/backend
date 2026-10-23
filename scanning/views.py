@@ -5,8 +5,9 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from accounts.views import require_admin
+from accounts.views import require_staff
 from bookings.models import Ticket
+from catalog.models import Occurrence
 
 from .models import ScanEvent
 
@@ -32,7 +33,7 @@ def log_scan(request, *, code, ticket, occurrence_id, gate, accepted, reason, me
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_admin
+@require_staff
 def redeem(request):
     try:
         body = json.loads(request.body or "{}")
@@ -137,7 +138,32 @@ def redeem(request):
 
 
 @require_http_methods(["GET"])
-@require_admin
+@require_staff
+def occurrences(request):
+    """Upcoming/recent events the operator can scan against (the admin list is admin-only)."""
+    cutoff = timezone.now() - timezone.timedelta(days=2)
+    rows = Occurrence.objects.select_related("service", "service__provider").filter(departs_at__gte=cutoff).order_by("departs_at")[:200]
+    return JsonResponse(
+        {
+            "occurrences": [
+                {
+                    "id": o.id,
+                    "title": o.service.title,
+                    "mode": o.mode,
+                    "providerName": o.service.provider.display_name,
+                    "departsAt": o.departs_at.isoformat(),
+                    "status": o.status,
+                    "capacity": o.capacity,
+                    "seatsSold": o.seats_sold,
+                }
+                for o in rows
+            ]
+        }
+    )
+
+
+@require_http_methods(["GET"])
+@require_staff
 def stats(request):
     occurrence_id = request.GET.get("occurrenceId") or None
 
@@ -152,7 +178,7 @@ def stats(request):
 
 
 @require_http_methods(["GET"])
-@require_admin
+@require_staff
 def history(request):
     occurrence_id = request.GET.get("occurrenceId") or None
     try:

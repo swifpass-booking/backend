@@ -185,7 +185,7 @@ def tracking(request, occurrence_id):
         header = request.headers.get("Authorization", "")
         user_id = decode_token(header[7:]) if header.startswith("Bearer ") else None
         user = User.objects.filter(id=user_id).first() if user_id else None
-        if not user or user.role not in ("operator_staff", "admin"):
+        if not user or user.role not in ("operator_staff", "gate_agent", "admin"):
             return error(403, "forbidden", "Only operator staff can report vehicle positions.")
         try:
             body = json.loads(request.body or "{}")

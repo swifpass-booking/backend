@@ -8,7 +8,7 @@ from accounts.views import require_admin
 from bookings.models import Booking
 from catalog.models import Occurrence
 
-MODE_ORDER = ["air", "bus", "rail", "event"]
+MODE_ORDER = ["air", "bus", "rail", "event", "hotel", "resort", "hall"]
 
 
 @require_http_methods(["GET"])

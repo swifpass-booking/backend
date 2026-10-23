@@ -112,6 +112,18 @@ class Occurrence(models.Model):
             details.setdefault("trainNumber", service.code or "")
             details.setdefault("coachClass", "general")
             details.setdefault("platform", None)
+        elif self.mode in ("hotel", "resort"):
+            details.setdefault("starRating", 3)
+            details.setdefault("amenities", [])
+            details.setdefault("checkInTime", "14:00")
+            details.setdefault("checkOutTime", "11:00")
+            details["nights"] = (
+                max((self.arrives_at.date() - self.departs_at.date()).days, 1) if self.arrives_at else 1
+            )
+        elif self.mode == "hall":
+            details.setdefault("capacityGuests", self.capacity)
+            details.setdefault("amenities", [])
+            details.setdefault("eventTypes", [])
         elif self.mode == "event":
             details.setdefault("category", "community")
             details.setdefault("ageRating", None)

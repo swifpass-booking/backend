@@ -1,7 +1,7 @@
 import json
 import re
 import secrets
-from datetime import timedelta
+from datetime import date, timedelta
 
 from django.db import IntegrityError, transaction
 from django.db.models import F
@@ -25,6 +25,42 @@ from .models import Booking, Passenger, Ticket
 PAYMENT_METHODS = {"esewa", "khalti", "fonepay", "card"}
 GATEWAY_METHODS = {"esewa", "khalti"}  # real redirect flow on web; other methods stay instant-confirm
 MAX_PASSENGERS = 9
+
+
+PASSPORT_NUMBER_RE = re.compile(r"^[A-Z0-9]{5,12}$")
+
+
+def is_international(occurrence):
+    service = occurrence.service
+    origin, dest = service.origin_place, service.dest_place
+    return occurrence.mode == "air" and bool(origin and dest and origin.country != dest.country)
+
+
+def clean_passport(raw, departs_at):
+    """Validate one traveller's passport dict. Returns (fields, None) or (None, message)."""
+    if not isinstance(raw, dict):
+        return None, "Passport details are required for international flights."
+    number = str(raw.get("passportNumber", "")).strip().upper()
+    nationality = str(raw.get("nationality", "")).strip().upper()
+    sex = raw.get("sex")
+    try:
+        birth = date.fromisoformat(raw.get("birthDate", ""))
+        expiry = date.fromisoformat(raw.get("expiryDate", ""))
+    except (TypeError, ValueError):
+        return None, "Passport dates must be YYYY-MM-DD."
+    if not PASSPORT_NUMBER_RE.match(number):
+        return None, "Enter a valid passport number."
+    if not re.fullmatch(r"[A-Z]{3}", nationality):
+        return None, "Nationality must be a 3-letter code."
+    if sex not in {"M", "F", "X"}:
+        return None, "Sex must be M, F or X."
+    if birth >= timezone.localdate():
+        return None, "Date of birth must be in the past."
+    # Airlines commonly require 6 months of validity remaining on the day of travel.
+    min_expiry = departs_at.date() + timedelta(days=183)
+    if expiry < min_expiry:
+        return None, "Passport must be valid for at least 6 months after travel."
+    return (number, nationality, birth, expiry, sex), None
 
 
 def error(status, code, message):
@@ -156,6 +192,15 @@ def create_booking(request):
                 return error(400, "validation_failed", "That trip or event is no longer available.")
 
             n = len(names)
+            passport_fields = [None] * n
+            if is_international(occurrence):
+                passports = body.get("passports")
+                if not isinstance(passports, list) or len(passports) != n:
+                    return error(400, "passport_required", "Passport details are required for every traveller on an international flight.")
+                for i, raw in enumerate(passports):
+                    passport_fields[i], problem = clean_passport(raw, occurrence.departs_at)
+                    if problem:
+                        return error(400, "passport_invalid", f"Traveller {i + 1}: {problem}")
             if occurrence.seats_available() < n:
                 return error(409, "seat_unavailable", "Not enough seats left.")
 
@@ -209,6 +254,9 @@ def create_booking(request):
                 passenger = Passenger.objects.create(
                     booking=booking, full_name=name.strip(), is_lead=(i == 0), order=i, seat_label=seat
                 )
+                if passport_fields[i]:
+                    passenger.set_passport(*passport_fields[i])
+                    passenger.save()
                 if not via_gateway:
                     Ticket.objects.create(booking=booking, passenger=passenger, occurrence=occurrence, seat_label=seat)
 

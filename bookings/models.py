@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import secrets
 import uuid
 
@@ -107,11 +109,31 @@ class Passenger(models.Model):
     order = models.PositiveSmallIntegerField(default=0)
     seat_label = models.CharField(max_length=12, null=True, blank=True)
 
+    # International flights only. The full passport number is never stored:
+    # last 4 for display/support, a keyed hash so the same passport can be matched.
+    passport_last4 = models.CharField(max_length=4, blank=True, default="")
+    passport_hash = models.CharField(max_length=64, blank=True, default="", editable=False)
+    nationality = models.CharField(max_length=3, blank=True, default="")
+    birth_date = models.DateField(null=True, blank=True)
+    passport_expiry = models.DateField(null=True, blank=True)
+    sex = models.CharField(max_length=1, blank=True, default="")
+
     class Meta:
         ordering = ["order"]
 
+    def set_passport(self, number, nationality, birth_date, expiry, sex):
+        self.passport_last4 = number[-4:]
+        self.passport_hash = hmac.new(settings.SECRET_KEY.encode(), number.encode(), hashlib.sha256).hexdigest()
+        self.nationality = nationality
+        self.birth_date = birth_date
+        self.passport_expiry = expiry
+        self.sex = sex
+
     def to_dict(self):
-        return {"fullName": self.full_name, "isLead": self.is_lead, "seatLabel": self.seat_label}
+        data = {"fullName": self.full_name, "isLead": self.is_lead, "seatLabel": self.seat_label}
+        if self.passport_last4:
+            data["passport"] = {"numberLast4": self.passport_last4, "nationality": self.nationality}
+        return data
 
     def __str__(self):
         return self.full_name

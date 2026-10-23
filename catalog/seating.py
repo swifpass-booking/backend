@@ -18,10 +18,13 @@ from .models import PLATFORM_FEE_RATE
 # Zones this large are standing/general admission: no seat picking (a stadium stand is not a seat map).
 MAX_SEATED_EVENT_ZONE = 500
 PLATFORM_FEE = PLATFORM_FEE_RATE
+STAY_MODES = ("hotel", "resort", "hall")
 
 
 def zone_is_seated(occurrence, zone):
     """Whether travellers pick individual seats in this zone."""
+    if occurrence.mode in STAY_MODES:
+        return False  # rooms and hall slots are booked by count, not by seat
     if occurrence.mode == "event":
         return zone.capacity <= MAX_SEATED_EVENT_ZONE
     return True
