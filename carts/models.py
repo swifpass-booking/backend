@@ -1,24 +1,13 @@
-import uuid
+from functools import partial
 
 from django.db import models
 from django.utils import timezone
 
 from catalog.models import PLATFORM_FEE_RATE, InventoryZone, Occurrence
+from swiftpass.ids import prefixed_id
 
 HOLD_TTL_SECONDS_MAX = 600  # capped server-side, per the contract note on CreateHoldRequest.ttlSeconds
 CART_TTL_SECONDS = 1200
-
-
-def new_hold_id():
-    return f"hld_{uuid.uuid4().hex[:20]}"
-
-
-def new_cart_id():
-    return f"crt_{uuid.uuid4().hex[:20]}"
-
-
-def new_cart_item_id():
-    return f"cti_{uuid.uuid4().hex[:20]}"
 
 
 class Hold(models.Model):
@@ -26,7 +15,7 @@ class Hold(models.Model):
     cart item exists. `create_hold` is the only agent tool allowed to mutate
     inventory ahead of an actual purchase."""
 
-    id = models.CharField(primary_key=True, max_length=32, default=new_hold_id, editable=False)
+    id = models.CharField(primary_key=True, max_length=32, default=partial(prefixed_id, "hld"), editable=False)
     user = models.ForeignKey(
         "accounts.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="holds"
     )
@@ -55,7 +44,7 @@ class Hold(models.Model):
 
 
 class Cart(models.Model):
-    id = models.CharField(primary_key=True, max_length=32, default=new_cart_id, editable=False)
+    id = models.CharField(primary_key=True, max_length=32, default=partial(prefixed_id, "crt"), editable=False)
     user = models.ForeignKey(
         "accounts.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="carts"
     )
@@ -80,7 +69,7 @@ class Cart(models.Model):
 
 
 class CartItem(models.Model):
-    id = models.CharField(primary_key=True, max_length=32, default=new_cart_item_id, editable=False)
+    id = models.CharField(primary_key=True, max_length=32, default=partial(prefixed_id, "cti"), editable=False)
     cart = models.ForeignKey(Cart, on_delete=models.CASCADE, related_name="items")
     leg_index = models.PositiveSmallIntegerField(default=0)
     hold = models.OneToOneField(Hold, on_delete=models.CASCADE, related_name="cart_item")

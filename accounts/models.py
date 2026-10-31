@@ -1,11 +1,9 @@
-import uuid
+from functools import partial
 
 from django.contrib.auth.hashers import check_password, make_password
 from django.db import models
 
-
-def new_user_id():
-    return f"usr_{uuid.uuid4().hex[:20]}"
+from swiftpass.ids import prefixed_id
 
 
 class User(models.Model):
@@ -19,7 +17,7 @@ class User(models.Model):
         ("admin", "Admin"),
     ]
 
-    id = models.CharField(primary_key=True, max_length=32, default=new_user_id, editable=False)
+    id = models.CharField(primary_key=True, max_length=32, default=partial(prefixed_id, "usr"), editable=False)
     email = models.EmailField(unique=True, null=True, blank=True)
     phone_e164 = models.CharField(unique=True, null=True, blank=True, max_length=20)
     password_hash = models.CharField(max_length=255)

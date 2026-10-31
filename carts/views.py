@@ -1,5 +1,3 @@
-import json
-
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -7,19 +5,9 @@ from django.views.decorators.http import require_http_methods
 
 from accounts.views import require_auth
 from catalog.models import InventoryZone, Occurrence
+from swiftpass.http import error, parse_body
 
 from .models import CART_TTL_SECONDS, HOLD_TTL_SECONDS_MAX, Cart, CartItem, Hold
-
-
-def error(status, code, message):
-    return JsonResponse({"error": {"code": code, "message": message}}, status=status)
-
-
-def parse_body(request):
-    try:
-        return json.loads(request.body or "{}")
-    except json.JSONDecodeError:
-        return None
 
 
 @csrf_exempt

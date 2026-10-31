@@ -1,26 +1,19 @@
 import hashlib
 import hmac
 import secrets
-import uuid
+from functools import partial
 
 from django.conf import settings
 from django.db import models
 
 from catalog.models import Occurrence
+from swiftpass.ids import prefixed_id
 
 REFERENCE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I — matches the frontend's QR mock
 
 
-def new_booking_id():
-    return f"bkg_{uuid.uuid4().hex[:20]}"
-
-
 def new_reference():
     return "SWP-" + "".join(secrets.choice(REFERENCE_ALPHABET) for _ in range(6))
-
-
-def new_ticket_id():
-    return f"tkt_{uuid.uuid4().hex[:20]}"
 
 
 def new_ticket_code():
@@ -38,7 +31,7 @@ class Booking(models.Model):
         ("refunded", "Refunded"),
     ]
 
-    id = models.CharField(primary_key=True, max_length=32, default=new_booking_id, editable=False)
+    id = models.CharField(primary_key=True, max_length=32, default=partial(prefixed_id, "bkg"), editable=False)
     reference = models.CharField(max_length=12, unique=True, default=new_reference, editable=False)
     user = models.ForeignKey(
         "accounts.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="bookings"
@@ -146,7 +139,7 @@ class Ticket(models.Model):
         ("void", "Void"),
     ]
 
-    id = models.CharField(primary_key=True, max_length=32, default=new_ticket_id, editable=False)
+    id = models.CharField(primary_key=True, max_length=32, default=partial(prefixed_id, "tkt"), editable=False)
     code = models.CharField(max_length=64, unique=True, default=new_ticket_code, editable=False)
     booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="tickets")
     passenger = models.OneToOneField(Passenger, on_delete=models.CASCADE, related_name="ticket")

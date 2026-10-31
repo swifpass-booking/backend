@@ -1,13 +1,13 @@
 import json
 
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import User
 from catalog.models import InventoryZone, Occurrence, Place, Provider, Service
 
-from .models import Booking
+from .models import Booking, Ticket
 
 
 class SecurityTests(TestCase):
@@ -60,6 +60,7 @@ class SecurityTests(TestCase):
         self.assertEqual(self.occ.seats_sold, 1)
 
 
+@override_settings(DEMO_INSTANT_PAYMENT=True)
 class SeatSelectionTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -84,7 +85,7 @@ class SeatSelectionTests(TestCase):
         }
         if seats is not None:
             body["seats"] = seats
-        return self.client.post("/v1/bookings", data=json.dumps(body), content_type="application/json")
+        return self.client.post("/v1/bookings", data=json.dumps(body), content_type="application/json", HTTP_X_CLIENT="mobile")
 
     def test_seatmap_has_capacity_seats(self):
         data = self.client.get("/v1/occurrences/occ_1/seatmap").json()
@@ -109,6 +110,36 @@ class SeatSelectionTests(TestCase):
         res = self._book(None, n=2)
         self.assertEqual(res.status_code, 201)
         self.assertEqual(sorted(t["seatLabel"] for t in res.json()["tickets"]), ["1A", "1B"])
+
+
+class PaymentBypassTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        provider = Provider.objects.create(id="p1", legal_name="P", display_name="P", adapter_key="x")
+        service = Service.objects.create(id="s1", provider=provider, mode="bus", title="KTM-PKR")
+        Occurrence.objects.create(
+            id="occ_1", service=service, mode="bus", departs_at=timezone.now() + timezone.timedelta(days=1),
+            base_price_minor=100000, capacity=5,
+        )
+
+    def _book(self, payment, **extra):
+        return self.client.post(
+            "/v1/bookings",
+            data=json.dumps({
+                "offer": {"occurrenceId": "occ_1"}, "names": ["Asha Rai"], "phone": "9800000000",
+                "payment": payment, "total": {"amount": 105000, "currency": "NPR"},
+                "card": {"number": "4242424242424242", "expiry": "12/99", "cvc": "123"},
+            }),
+            content_type="application/json", **extra,
+        )
+
+    def test_mobile_header_does_not_skip_payment(self):
+        self.assertEqual(self._book("esewa", HTTP_X_CLIENT="mobile").json()["status"], "pending_payment")
+        self.assertEqual(Ticket.objects.count(), 0)
+
+    def test_card_is_rejected_when_demo_payments_are_off(self):
+        self.assertEqual(self._book("card").status_code, 400)
+        self.assertEqual(Booking.objects.count(), 0)
 
 
 class AuthTests(TestCase):
@@ -137,6 +168,7 @@ class AuthTests(TestCase):
         self.assertEqual(codes[5], 429)
 
 
+@override_settings(DEMO_INSTANT_PAYMENT=True)
 class PassportTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -160,7 +192,7 @@ class PassportTests(TestCase):
         }
         if passports is not None:
             body["passports"] = passports
-        return self.client.post("/v1/bookings", data=json.dumps(body), content_type="application/json")
+        return self.client.post("/v1/bookings", data=json.dumps(body), content_type="application/json", HTTP_X_CLIENT="mobile")
 
     def test_international_requires_passport(self):
         res = self._book("occ_s_intl")

@@ -1,5 +1,4 @@
 import functools
-import json
 import re
 
 from django.contrib.auth.password_validation import validate_password
@@ -10,6 +9,9 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from swiftpass.http import error, parse_body
+
+from . import authz
 from .jwt import decode_token, issue_token
 from .models import User
 from .throttle import throttle
@@ -26,22 +28,8 @@ def is_valid_phone(value):
     return bool(PHONE_RE.match(value or ""))
 
 
-def error(status, code, message):
-    return JsonResponse({"error": {"code": code, "message": message}}, status=status)
-
-
-def parse_body(request):
-    if not request.body:
-        return {}
-    try:
-        body = json.loads(request.body)
-    except json.JSONDecodeError:
-        return {}
-    return body if isinstance(body, dict) else {}
-
-
 def _login_key(request):
-    ident = parse_body(request).get("identifier")
+    ident = (parse_body(request) or {}).get("identifier")
     return ident.strip().lower()[:100] if isinstance(ident, str) else ""
 
 
@@ -66,7 +54,7 @@ def require_admin(view):
     @require_auth
     def wrapped(request, *args, **kwargs):
         user = User.objects.filter(id=request.user_id).first()
-        if not user or user.role != "admin":
+        if not user or not authz.is_admin(user.id):
             return error(403, "unauthorised", "Admin access required.")
         request.admin_user = user
         return view(request, *args, **kwargs)
@@ -74,19 +62,19 @@ def require_admin(view):
     return wrapped
 
 
-STAFF_ROLES = ("admin", "operator_staff", "gate_agent")
-
-
 def require_staff(view):
-    """Admins and operator/gate staff — everyone allowed to scan tickets at a gate."""
+    """Anyone who can operate at least one provider (admins can operate all). Sets
+    request.staff_provider_ids; views still check the specific occurrence they touch."""
 
     @functools.wraps(view)
     @require_auth
     def wrapped(request, *args, **kwargs):
         user = User.objects.filter(id=request.user_id).first()
-        if not user or user.role not in STAFF_ROLES:
+        provider_ids = authz.staff_provider_ids(user.id) if user else []
+        if not provider_ids:
             return error(403, "unauthorised", "Staff access required.")
         request.admin_user = user
+        request.staff_provider_ids = provider_ids
         return view(request, *args, **kwargs)
 
     return wrapped
@@ -96,7 +84,7 @@ def require_staff(view):
 @require_http_methods(["POST"])
 @throttle("register", limit=10, window=3600)
 def register(request):
-    body = parse_body(request)
+    body = parse_body(request) or {}
     full_name = body.get("fullName")
     identifier = body.get("identifier")
     identifier = identifier.strip() if isinstance(identifier, str) else ""
@@ -137,7 +125,7 @@ def register(request):
 @throttle("login-ip", limit=30, window=900)
 @throttle("login-id", limit=5, window=900, key_func=_login_key)
 def login(request):
-    body = parse_body(request)
+    body = parse_body(request) or {}
     identifier = body.get("identifier")
     identifier = identifier.strip() if isinstance(identifier, str) else ""
     password = body.get("password")

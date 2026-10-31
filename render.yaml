@@ -44,7 +44,7 @@ services:
       - key: ESEWA_PRODUCT_CODE
         value: EPAYTEST
       - key: ESEWA_SECRET_KEY
-        value: "8gBm/:&EnhH.1/q"
+        sync: false
       - key: KHALTI_SECRET_KEY
         sync: false
 

@@ -1,4 +1,3 @@
-import json
 import uuid
 
 from datetime import timedelta
@@ -9,13 +8,11 @@ from django.utils.dateparse import parse_date
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from swiftpass.http import error, parse_body
+
 from . import geo, routing
 
-from .models import InventoryZone, Occurrence, VehiclePosition
-
-
-def error(status, code, message):
-    return JsonResponse({"error": {"code": code, "message": message}}, status=status)
+from .models import Occurrence, VehiclePosition
 
 
 @csrf_exempt
@@ -27,9 +24,8 @@ def search(request):
     leg in the request is queried independently and its matches are merged
     into one offers[] list, same as a one-leg trip would be.
     """
-    try:
-        body = json.loads(request.body or "{}")
-    except json.JSONDecodeError:
+    body = parse_body(request)
+    if body is None:
         return error(400, "validation_failed", "Malformed request body.")
 
     legs = body.get("legs") or []
@@ -179,18 +175,17 @@ def tracking(request, occurrence_id):
         return error(404, "not_found", "No such trip.")
 
     if request.method == "POST":
+        from accounts import authz
         from accounts.jwt import decode_token
-        from accounts.models import User
 
         header = request.headers.get("Authorization", "")
         user_id = decode_token(header[7:]) if header.startswith("Bearer ") else None
-        user = User.objects.filter(id=user_id).first() if user_id else None
-        if not user or user.role not in ("operator_staff", "gate_agent", "admin"):
+        if not user_id or not authz.can_track(user_id, occ.id):
             return error(403, "forbidden", "Only operator staff can report vehicle positions.")
+        body = parse_body(request) or {}
         try:
-            body = json.loads(request.body or "{}")
             lat, lng = float(body["lat"]), float(body["lng"])
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        except (ValueError, KeyError, TypeError):
             return error(400, "validation_failed", "lat and lng are required numbers.")
         if not (-90 <= lat <= 90 and -180 <= lng <= 180):
             return error(400, "validation_failed", "Coordinates out of range.")

@@ -1,4 +1,4 @@
-# Full stack for a local preview: `docker compose up --build`, then open http://localhost:8080
+# Full stack for a local preview: `docker compose up --build`, then open http://localhost:8088
 # Expects the sibling repos checked out next to this one (../frontend, ../model).
 # Optional: put GROQ_API_KEY=... in backend/.env to enable the voice/chat agent.
 name: swiftpass
@@ -17,37 +17,64 @@ services:
       interval: 3s
       retries: 20
 
+  openfga-migrate:
+    image: openfga/openfga:v1.8.4
+    command: migrate
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://swiftpass:swiftpass@db:5432/swiftpass?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+
+  openfga:
+    image: openfga/openfga:v1.8.4
+    command: run
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://swiftpass:swiftpass@db:5432/swiftpass?sslmode=disable
+      OPENFGA_AUTHN_METHOD: preshared
+      OPENFGA_AUTHN_PRESHARED_KEYS: ${OPENFGA_API_TOKEN:-local-preview-openfga-key}
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+
   backend:
     build: .
     depends_on:
       db:
         condition: service_healthy
+      openfga:
+        condition: service_started
     environment:
       DATABASE_URL: postgres://swiftpass:swiftpass@db:5432/swiftpass
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-preview-django-secret-change-me}
       JWT_SECRET: ${JWT_SECRET:-local-preview-jwt-secret-change-me-0123456789}
       DJANGO_ALLOWED_HOSTS: backend,localhost,127.0.0.1
+      OPENFGA_API_URL: http://openfga:8080
+      OPENFGA_API_TOKEN: ${OPENFGA_API_TOKEN:-local-preview-openfga-key}
       DJANGO_SSL_REDIRECT: "0"  # plain-HTTP preview; real hosts terminate TLS in front
-      FRONTEND_BASE_URL: http://localhost:8080
+      DJANGO_DEBUG: "1"
+      DEMO_INSTANT_PAYMENT: "1"  # local preview only: instant-confirm mobile/card bookings, fake Khalti
+      FRONTEND_BASE_URL: http://localhost:8088
       ESEWA_PRODUCT_CODE: EPAYTEST
-      ESEWA_SECRET_KEY: "8gBm/:&EnhH.1/q"
       ADMIN_IDENTIFIER: ${ADMIN_IDENTIFIER:-admin@swiftpass.dev}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
   agent:
-    build: ../model/agent-project
+    build: ../models/agent-project
     environment:
       SWIFTPASS_API_BASE_URL: http://backend:8000/v1
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      AGENT_CORS_ORIGINS: http://localhost:8080
+      AGENT_CORS_ORIGINS: http://localhost:8088
 
   frontend:
     build: ../frontend
     depends_on: [backend, agent]
     ports:
-      - "8080:80"
+      - "8088:80"
 
 volumes:
   pgdata:

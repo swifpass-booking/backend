@@ -1,18 +1,15 @@
-import uuid
+from functools import partial
 
 from django.db import models
 
 from accounts.models import User
 from bookings.models import Ticket
 from catalog.models import Occurrence
-
-
-def new_scan_event_id():
-    return f"scn_{uuid.uuid4().hex[:20]}"
+from swiftpass.ids import prefixed_id
 
 
 class ScanEvent(models.Model):
-    id = models.CharField(primary_key=True, max_length=32, default=new_scan_event_id, editable=False)
+    id = models.CharField(primary_key=True, max_length=32, default=partial(prefixed_id, "scn"), editable=False)
     code = models.CharField(max_length=64)
     ticket = models.ForeignKey(Ticket, null=True, blank=True, on_delete=models.SET_NULL, related_name="scan_events")
     occurrence = models.ForeignKey(

@@ -1,4 +1,3 @@
-import json
 import re
 import secrets
 from datetime import date, timedelta
@@ -8,7 +7,6 @@ from django.db.models import F
 from django.conf import settings
 from django.http import JsonResponse
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
@@ -18,12 +16,35 @@ from accounts.throttle import throttle
 from accounts.views import is_valid_email, is_valid_phone
 from catalog import seating
 from catalog.models import PLATFORM_FEE_RATE, Occurrence
+from swiftpass.http import error, parse_body
 
 from . import gateways
 from .models import Booking, Passenger, Ticket
 
+# Demo card processor: only well-known test PANs are accepted, so a real card can never be charged or stored.
+TEST_CARDS = {"4242424242424242": "visa", "5555555555554444": "mastercard"}
+DECLINED_TEST_CARD = "4000000000000002"
+
+
+def _card_problem(card):
+    """Message when the demo card is unusable, else None. The card is never saved."""
+    if not isinstance(card, dict):
+        return "Enter your card details."
+    number = re.sub(r"\s", "", str(card.get("number", "")))
+    m = re.fullmatch(r"(\d{2})\s*/\s*(\d{2})", str(card.get("expiry", "")).strip())
+    if not m or not 1 <= int(m[1]) <= 12 or (2000 + int(m[2]), int(m[1])) < (timezone.now().year, timezone.now().month):
+        return "Card expiry is invalid or in the past."
+    if not re.fullmatch(r"\d{3}", str(card.get("cvc", ""))):
+        return "Enter the 3-digit CVC."
+    if number == DECLINED_TEST_CARD:
+        return "Your card was declined (test card 4000 0000 0000 0002)."
+    if number not in TEST_CARDS:
+        return "Demo mode accepts test cards only: 4242 4242 4242 4242 (Visa) or 5555 5555 5555 4444 (Mastercard)."
+    return None
+
+
 PAYMENT_METHODS = {"esewa", "khalti", "fonepay", "card"}
-GATEWAY_METHODS = {"esewa", "khalti"}  # real redirect flow on web; other methods stay instant-confirm
+GATEWAY_METHODS = {"esewa", "khalti", "fonepay"}  # real redirect flow on web; other methods stay instant-confirm
 MAX_PASSENGERS = 9
 
 
@@ -63,10 +84,6 @@ def clean_passport(raw, departs_at):
     return (number, nationality, birth, expiry, sex), None
 
 
-def error(status, code, message):
-    return JsonResponse({"error": {"code": code, "message": message}}, status=status)
-
-
 def optional_user(request):
     header = request.headers.get("Authorization", "")
     token = header[7:] if header.startswith("Bearer ") else None
@@ -99,6 +116,9 @@ def _start_gateway(booking):
     if booking.payment_method == "esewa":
         ref = f"{booking.reference}-{secrets.token_hex(3)}"
         info = gateways.esewa_start(booking, ref)
+    elif booking.payment_method == "fonepay":
+        ref = f"{booking.reference}-{secrets.token_hex(3)}"
+        info = gateways.fonepay_start(booking, ref)
     else:
         info = gateways.khalti_start(booking)
         ref = info["pidx"]
@@ -128,11 +148,8 @@ def _with_gateway(booking, status):
 @require_http_methods(["POST"])
 @throttle("booking", limit=20, window=600)
 def create_booking(request):
-    try:
-        body = json.loads(request.body or "{}")
-    except json.JSONDecodeError:
-        return error(400, "validation_failed", "Malformed request body.")
-    if not isinstance(body, dict):
+    body = parse_body(request)
+    if body is None:
         return error(400, "validation_failed", "Malformed request body.")
 
     offer = body.get("offer")
@@ -159,6 +176,14 @@ def create_booking(request):
         return error(400, "validation_failed", "Enter a valid email address.")
     if payment not in PAYMENT_METHODS:
         return error(400, "validation_failed", "Choose a valid payment method.")
+    # The X-Client header only picks the demo path when the server allows it; it never skips payment on its own.
+    demo_instant = settings.DEMO_INSTANT_PAYMENT and request.headers.get("X-Client") == "mobile"
+    if payment == "card" and not settings.DEMO_INSTANT_PAYMENT:
+        return error(400, "validation_failed", "Card payments are not available.")
+    if payment == "card" and not demo_instant:
+        problem = _card_problem(body.get("card"))
+        if problem:
+            return error(402, "payment_failed", problem)
     if seats is not None and (
         not isinstance(seats, list) or not all(isinstance(x, str) and 0 < len(x) <= 12 for x in seats)
     ):
@@ -177,7 +202,7 @@ def create_booking(request):
             return JsonResponse(existing.to_dict(), status=200)
 
     _release_stale_pending()
-    via_gateway = payment in GATEWAY_METHODS and request.headers.get("X-Client") != "mobile"
+    via_gateway = payment in GATEWAY_METHODS and not demo_instant
 
     try:
         with transaction.atomic():
@@ -279,9 +304,8 @@ def create_booking(request):
 def verify_payment(request):
     """Called by the frontend when the gateway sends the traveller back. Re-checks the payment with
     the gateway server-to-server, then confirms the booking and issues tickets (idempotent)."""
-    try:
-        body = json.loads(request.body or "{}")
-    except json.JSONDecodeError:
+    body = parse_body(request)
+    if body is None:
         return error(400, "validation_failed", "Malformed request body.")
     provider = body.get("provider")
 
@@ -290,6 +314,13 @@ def verify_payment(request):
             if body.get("failed") and not body.get("data"):
                 return _fail_by_ref(body.get("ref"), "eSewa payment was cancelled or failed.")
             ref, paid_minor = gateways.esewa_check(str(body.get("data") or ""))
+        elif provider == "fonepay":
+            query = body.get("query")
+            if not isinstance(query, dict):
+                return error(400, "validation_failed", "Missing Fonepay response.")
+            ref, paid_minor = gateways.fonepay_check(query)
+            if paid_minor is None:
+                return _fail_by_ref(ref, "Fonepay payment was cancelled or failed.")
         elif provider == "khalti":
             ref = str(body.get("pidx") or "")
             if not ref:

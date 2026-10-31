@@ -1,19 +1,15 @@
-import json
-
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from accounts import authz
 from accounts.views import require_staff
 from bookings.models import Ticket
 from catalog.models import Occurrence
+from swiftpass.http import error, parse_body
 
 from .models import ScanEvent
-
-
-def error(status, code, message):
-    return JsonResponse({"error": {"code": code, "message": message}}, status=status)
 
 
 def log_scan(request, *, code, ticket, occurrence_id, gate, accepted, reason, message, passenger_name, trip_title):
@@ -35,9 +31,8 @@ def log_scan(request, *, code, ticket, occurrence_id, gate, accepted, reason, me
 @require_http_methods(["POST"])
 @require_staff
 def redeem(request):
-    try:
-        body = json.loads(request.body or "{}")
-    except json.JSONDecodeError:
+    body = parse_body(request)
+    if body is None:
         return error(400, "validation_failed", "Malformed request body.")
 
     code = (body.get("code") or "").strip()
@@ -49,6 +44,11 @@ def redeem(request):
 
     ticket = Ticket.objects.select_related("passenger", "booking").filter(code=code).first()
     now = timezone.now()
+
+    # Check before any response that names the passenger, so staff of one provider learn nothing about another's tickets.
+    for target in (occurrence_id, ticket.occurrence_id if ticket else None):
+        if target and not authz.can_scan(request.admin_user.id, target):
+            return error(403, "forbidden", "You cannot scan tickets for this event.")
 
     if not ticket:
         log_scan(
@@ -142,7 +142,7 @@ def redeem(request):
 def occurrences(request):
     """Upcoming/recent events the operator can scan against (the admin list is admin-only)."""
     cutoff = timezone.now() - timezone.timedelta(days=2)
-    rows = Occurrence.objects.select_related("service", "service__provider").filter(departs_at__gte=cutoff).order_by("departs_at")[:200]
+    rows = Occurrence.objects.select_related("service", "service__provider").filter(departs_at__gte=cutoff, service__provider_id__in=request.staff_provider_ids).order_by("departs_at")[:200]
     return JsonResponse(
         {
             "occurrences": [
@@ -167,7 +167,11 @@ def occurrences(request):
 def stats(request):
     occurrence_id = request.GET.get("occurrenceId") or None
 
-    qs = Ticket.objects.all() if occurrence_id is None else Ticket.objects.filter(occurrence_id=occurrence_id)
+    if occurrence_id and not authz.can_scan(request.admin_user.id, occurrence_id):
+        return error(403, "forbidden", "You cannot view this event.")
+    qs = Ticket.objects.filter(occurrence__service__provider_id__in=request.staff_provider_ids)
+    if occurrence_id:
+        qs = qs.filter(occurrence_id=occurrence_id)
     return JsonResponse(
         {
             "issued": qs.count(),
@@ -186,7 +190,9 @@ def history(request):
     except ValueError:
         limit = 100
 
-    qs = ScanEvent.objects.select_related("scanned_by")
+    if occurrence_id and not authz.can_scan(request.admin_user.id, occurrence_id):
+        return error(403, "forbidden", "You cannot view this event.")
+    qs = ScanEvent.objects.select_related("scanned_by").filter(occurrence__service__provider_id__in=request.staff_provider_ids)
     if occurrence_id:
         qs = qs.filter(occurrence_id=occurrence_id)
 

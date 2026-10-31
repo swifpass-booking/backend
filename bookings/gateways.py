@@ -1,4 +1,4 @@
-"""eSewa (ePay v2) and Khalti (ePayment v2) sandbox integrations.
+"""eSewa (ePay v2), Khalti (ePayment v2) and Fonepay (dev) sandbox integrations.
 
 Both are redirect flows: the booking is created `pending_payment` (seats reserved), the browser is
 sent to the gateway, the gateway sends it back to the frontend, and the frontend calls
@@ -9,6 +9,7 @@ import base64
 import hashlib
 import hmac
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -91,7 +92,15 @@ def _khalti_headers():
     return {"Authorization": f"Key {settings.KHALTI_SECRET_KEY}"}
 
 
+def _khalti_demo() -> bool:
+    # shortcut: with no sandbox key, DEMO_INSTANT_PAYMENT fakes Khalti locally (settings.py keeps it off in production)
+    return settings.DEMO_INSTANT_PAYMENT and not settings.KHALTI_SECRET_KEY
+
+
 def khalti_start(booking) -> dict:
+    if _khalti_demo():
+        pidx = f"demo-{booking.reference}"
+        return {"provider": "khalti", "method": "GET", "url": f"{settings.FRONTEND_BASE_URL}/payment/khalti?pidx={pidx}", "pidx": pidx}
     if booking.total_minor < 1000:
         raise GatewayError("Khalti needs a total of at least Rs 10.")
     res = _http_json(
@@ -118,5 +127,44 @@ def khalti_start(booking) -> dict:
 
 def khalti_check(pidx: str):
     """Lookup with Khalti; returns (status, total_minor)."""
+    if _khalti_demo() and pidx.startswith("demo-"):
+        from .models import Booking
+        b = Booking.objects.filter(payment_ref=pidx).first()
+        return "Completed", b.total_minor if b else 0
     res = _http_json(f"{settings.KHALTI_BASE_URL}/epayment/lookup/", method="POST", headers=_khalti_headers(), body={"pidx": pidx})
     return res.get("status"), int(res.get("total_amount") or 0)
+
+
+# ---- Fonepay ----------------------------------------------------------------
+def _fonepay_sign(message: str) -> str:
+    return hmac.new(settings.FONEPAY_SECRET_KEY.encode(), message.encode(), hashlib.sha512).hexdigest()
+
+
+def fonepay_start(booking, prn: str) -> dict:
+    if not settings.FONEPAY_MERCHANT_CODE or not settings.FONEPAY_SECRET_KEY:
+        raise GatewayError("Fonepay is not configured (FONEPAY_MERCHANT_CODE / FONEPAY_SECRET_KEY).")
+    fields = {
+        "PID": settings.FONEPAY_MERCHANT_CODE,
+        "MD": "P",
+        "PRN": prn,
+        "AMT": _rupees(booking.total_minor),
+        "CRN": "NPR",
+        "DT": time.strftime("%m/%d/%Y"),
+        "R1": "SwiftPass",
+        "R2": "N/A",
+        "RU": f"{settings.FRONTEND_BASE_URL}/payment/fonepay",
+    }
+    fields["DV"] = _fonepay_sign(",".join(fields[k] for k in ("PID", "MD", "PRN", "AMT", "CRN", "DT", "R1", "R2", "RU")))
+    return {"provider": "fonepay", "method": "GET", "url": f"{settings.FONEPAY_URL}?{urllib.parse.urlencode(fields)}"}
+
+
+def fonepay_check(q: dict):
+    """Validate the signed return query. Returns (prn, paid_minor), paid_minor None when Fonepay says it failed.
+    shortcut: trusts the HMAC-signed redirect, skips Fonepay's verificationMerchant call, add it before going live."""
+    names = ("PRN", "PID", "PS", "RC", "UID", "BC", "INI", "P_AMT", "R_AMT")
+    if not hmac.compare_digest(_fonepay_sign(",".join(str(q.get(n, "")) for n in names)), str(q.get("DV", ""))):
+        raise GatewayError("Fonepay response signature did not match.")
+    prn = str(q.get("PRN", ""))
+    if str(q.get("PS")).lower() != "true" or str(q.get("RC")).lower() != "successful":
+        return prn, None
+    return prn, round(float(q.get("P_AMT") or 0) * 100)

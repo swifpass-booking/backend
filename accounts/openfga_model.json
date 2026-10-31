@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.1",
+  "type_definitions": [
+    {"type": "user"},
+    {
+      "type": "platform",
+      "relations": {"admin": {"this": {}}},
+      "metadata": {"relations": {"admin": {"directly_related_user_types": [{"type": "user"}]}}}
+    },
+    {
+      "type": "provider",
+      "relations": {
+        "platform": {"this": {}},
+        "operator_staff": {"this": {}},
+        "gate_agent": {"this": {}},
+        "staff": {
+          "union": {
+            "child": [
+              {"computedUserset": {"relation": "operator_staff"}},
+              {"computedUserset": {"relation": "gate_agent"}},
+              {"tupleToUserset": {"tupleset": {"relation": "platform"}, "computedUserset": {"relation": "admin"}}}
+            ]
+          }
+        }
+      },
+      "metadata": {
+        "relations": {
+          "platform": {"directly_related_user_types": [{"type": "platform"}]},
+          "operator_staff": {"directly_related_user_types": [{"type": "user"}]},
+          "gate_agent": {"directly_related_user_types": [{"type": "user"}]},
+          "staff": {"directly_related_user_types": []}
+        }
+      }
+    },
+    {
+      "type": "occurrence",
+      "relations": {
+        "provider": {"this": {}},
+        "can_scan": {"tupleToUserset": {"tupleset": {"relation": "provider"}, "computedUserset": {"relation": "staff"}}},
+        "can_track": {"tupleToUserset": {"tupleset": {"relation": "provider"}, "computedUserset": {"relation": "staff"}}}
+      },
+      "metadata": {
+        "relations": {
+          "provider": {"directly_related_user_types": [{"type": "provider"}]},
+          "can_scan": {"directly_related_user_types": []},
+          "can_track": {"directly_related_user_types": []}
+        }
+      }
+    }
+  ]
+}

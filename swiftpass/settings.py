@@ -193,6 +193,21 @@ ESEWA_PRODUCT_CODE = os.environ.get("ESEWA_PRODUCT_CODE", "EPAYTEST" if DEBUG el
 ESEWA_SECRET_KEY = os.environ.get("ESEWA_SECRET_KEY", "8gBm/:&EnhH.1/q" if DEBUG else "")
 ESEWA_FORM_URL = os.environ.get("ESEWA_FORM_URL", "https://rc-epay.esewa.com.np/api/epay/main/v2/form")
 ESEWA_STATUS_URL = os.environ.get("ESEWA_STATUS_URL", "https://rc.esewa.com.np/api/epay/transaction/status/")
+# Fonepay's published dev merchant (dev-clientapi.fonepay.com), defaulted in local dev only.
+FONEPAY_MERCHANT_CODE = os.environ.get("FONEPAY_MERCHANT_CODE", "NBQM" if DEBUG else "")
+FONEPAY_SECRET_KEY = os.environ.get("FONEPAY_SECRET_KEY", "a7e3512f5032480a83137793cb2021dc" if DEBUG else "")
+FONEPAY_URL = os.environ.get("FONEPAY_URL", "https://dev-clientapi.fonepay.com/api/merchantRequest")
 KHALTI_SECRET_KEY = os.environ.get("KHALTI_SECRET_KEY", "")
 KHALTI_BASE_URL = os.environ.get("KHALTI_BASE_URL", "https://dev.khalti.com/api/v2")
 PENDING_PAYMENT_MINUTES = 15
+# --- Authorization (OpenFGA) -------------------------------------------------
+# Roles live in OpenFGA (accounts/openfga_model.json). With OPENFGA_API_URL unset every
+# admin/staff check is denied. Run `manage.py openfga_setup` once, then `openfga_sync`.
+OPENFGA_API_URL = os.environ.get("OPENFGA_API_URL", "")
+OPENFGA_API_TOKEN = os.environ.get("OPENFGA_API_TOKEN", "")
+OPENFGA_STORE_ID = os.environ.get("OPENFGA_STORE_ID", "")
+OPENFGA_STORE_NAME = os.environ.get("OPENFGA_STORE_NAME", "swiftpass")
+
+# Local demos only: lets mobile/card bookings confirm and issue tickets without a real payment, and
+# fakes Khalti. Needs DEBUG too, so a production deploy cannot turn it on by env var alone.
+DEMO_INSTANT_PAYMENT = DEBUG and os.environ.get("DEMO_INSTANT_PAYMENT") == "1"
