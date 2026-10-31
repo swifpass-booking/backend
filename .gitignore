@@ -8,3 +8,4 @@ venv/
 .env
 db.sqlite3.bak
 staticfiles/
+.DS_Store
