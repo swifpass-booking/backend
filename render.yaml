@@ -28,6 +28,9 @@ services:
         generateValue: true
       - key: JWT_SECRET
         generateValue: true
+      # Render's proxy appends the client address to X-Forwarded-For; rate limits need it.
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"
       - key: FRONTEND_BASE_URL
         value: https://swiftpass-web.onrender.com
       - key: CORS_ALLOWED_ORIGINS
@@ -48,6 +51,8 @@ services:
       - key: KHALTI_SECRET_KEY
         sync: false
 
+  # NOTE: /agent/ws/voice is a websocket. Verify Render's static-site rewrite passes the upgrade after
+  # deploy; if not, serve the web app from frontend/Dockerfile (its nginx forwards websockets).
   # Voice/text booking concierge (model repo). Groq serves both the LLM and
   # Whisper STT, so one GROQ_API_KEY (console.groq.com, free) is all it needs.
   - type: web

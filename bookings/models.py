@@ -40,6 +40,9 @@ class Booking(models.Model):
         Occurrence, null=True, blank=True, on_delete=models.SET_NULL, related_name="bookings"
     )
 
+    # Set when a count-based (unseated) zone was bought, so its sold counter can be given back.
+    zone = models.ForeignKey("catalog.InventoryZone", null=True, blank=True, on_delete=models.SET_NULL, related_name="bookings")
+
     # Snapshot of the offer at purchase time — kept even if the occurrence changes later.
     offer_id = models.CharField(max_length=64)
     mode = models.CharField(max_length=10)
@@ -60,6 +63,8 @@ class Booking(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="confirmed")
     # Gateway session id: eSewa transaction_uuid or Khalti pidx (set while payment is pending).
     payment_ref = models.CharField(max_length=100, null=True, blank=True, db_index=True)
+    # The redirect instructions sent to the browser, kept so a retry after a lost reply can send the traveller to the same payment.
+    gateway_info = models.JSONField(null=True, blank=True, editable=False)
     paid_at = models.DateTimeField(null=True, blank=True)
     created_via = models.CharField(max_length=10, default="web")
     # "<user id or anon>:<client Idempotency-Key>" — a retried POST returns the original booking.
@@ -68,6 +73,7 @@ class Booking(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [models.Index(fields=["status", "created_at"])]  # the stale-pending sweep runs on every seat-map view
 
     def __str__(self):
         return self.reference
@@ -79,6 +85,7 @@ class Booking(models.Model):
             "status": self.status,
             "offerId": self.offer_id,
             "occurrenceId": self.occurrence_id,
+            "zoneId": self.zone_id,
             "mode": self.mode,
             "title": self.title,
             "providerName": self.provider_name,
@@ -158,6 +165,7 @@ class Ticket(models.Model):
             "code": self.code,
             "passengerName": self.passenger.full_name,
             "seatLabel": self.seat_label,
+            "zoneLabel": self.booking.zone.label if self.booking.zone_id else None,
             "status": self.status,
         }
 

@@ -3,6 +3,7 @@ import re
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError
 from django.db.models import Q
 from django.db.models import F
 from django.http import JsonResponse
@@ -12,7 +13,7 @@ from django.views.decorators.http import require_http_methods
 from swiftpass.http import error, parse_body
 
 from . import authz
-from .jwt import decode_token, issue_token
+from .jwt import decode_user, issue_token
 from .models import User
 from .throttle import throttle
 
@@ -21,7 +22,7 @@ PHONE_RE = re.compile(r"^\+?\d{7,15}$")
 
 
 def is_valid_email(value):
-    return bool(EMAIL_RE.match(value or ""))
+    return len(value or "") <= 254 and bool(EMAIL_RE.match(value or ""))
 
 
 def is_valid_phone(value):
@@ -40,10 +41,10 @@ def require_auth(view):
         token = header[7:] if header.startswith("Bearer ") else None
         if not token:
             return error(401, "unauthorised", "Sign in required.")
-        user_id = decode_token(token)
-        if not user_id:
+        user = decode_user(token)
+        if not user:
             return error(401, "unauthorised", "Session expired — sign in again.")
-        request.user_id = user_id
+        request.user_id, request.auth_user = user.id, user
         return view(request, *args, **kwargs)
 
     return wrapped
@@ -53,8 +54,8 @@ def require_admin(view):
     @functools.wraps(view)
     @require_auth
     def wrapped(request, *args, **kwargs):
-        user = User.objects.filter(id=request.user_id).first()
-        if not user or not authz.is_admin(user.id):
+        user = request.auth_user
+        if not authz.is_admin(user.id):
             return error(403, "unauthorised", "Admin access required.")
         request.admin_user = user
         return view(request, *args, **kwargs)
@@ -69,8 +70,8 @@ def require_staff(view):
     @functools.wraps(view)
     @require_auth
     def wrapped(request, *args, **kwargs):
-        user = User.objects.filter(id=request.user_id).first()
-        provider_ids = authz.staff_provider_ids(user.id) if user else []
+        user = request.auth_user
+        provider_ids = authz.staff_provider_ids(user.id)
         if not provider_ids:
             return error(403, "unauthorised", "Staff access required.")
         request.admin_user = user
@@ -100,7 +101,9 @@ def register(request):
     if not is_email and not is_phone:
         return error(400, "validation_failed", "Enter a valid email or phone number.")
 
-    lookup = Q(email=identifier) if is_email else Q(phone_e164=identifier)
+    if is_email:
+        identifier = identifier.lower()
+    lookup = Q(email__iexact=identifier) if is_email else Q(phone_e164=identifier)
     if User.objects.filter(lookup).exists():
         return error(409, "idempotency_conflict", "An account with that email or phone already exists.")
 
@@ -114,7 +117,10 @@ def register(request):
     except ValidationError as e:
         return error(400, "validation_failed", " ".join(e.messages))
     user.set_password(password)
-    user.save()
+    try:
+        user.save()
+    except IntegrityError:  # a double submit won the race between the check above and this save
+        return error(409, "idempotency_conflict", "An account with that email or phone already exists.")
 
     token = issue_token(user)
     return JsonResponse({"token": token, "user": user.to_public_dict()}, status=201)
@@ -133,7 +139,7 @@ def login(request):
     if not identifier or not password:
         return error(400, "validation_failed", "Enter your email/phone and password.")
 
-    user = User.objects.filter(Q(email=identifier) | Q(phone_e164=identifier)).first()
+    user = User.objects.filter(Q(email__iexact=identifier) | Q(phone_e164=identifier)).first()
     if not user or not user.check_password(password):
         return error(401, "unauthorised", "Incorrect email/phone or password.")
 
@@ -153,16 +159,10 @@ def logout(request):
 @require_http_methods(["GET"])
 @require_auth
 def me(request):
-    user = User.objects.filter(id=request.user_id).first()
-    if not user:
-        return error(401, "unauthorised", "Account no longer exists.")
-    return JsonResponse({"user": user.to_public_dict()})
+    return JsonResponse({"user": request.auth_user.to_public_dict()})
 
 
 @require_http_methods(["GET"])
 @require_auth
 def preferences(request):
-    user = User.objects.filter(id=request.user_id).first()
-    if not user:
-        return error(401, "unauthorised", "Account no longer exists.")
-    return JsonResponse(user.preferences or {})
+    return JsonResponse(request.auth_user.preferences or {})

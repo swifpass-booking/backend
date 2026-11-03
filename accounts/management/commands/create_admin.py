@@ -15,8 +15,10 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         identifier = options["identifier"].strip()
         is_email = "@" in identifier
+        if is_email:
+            identifier = identifier.lower()
 
-        user = User.objects.filter(email=identifier).first() or User.objects.filter(phone_e164=identifier).first()
+        user = User.objects.filter(email__iexact=identifier).first() or User.objects.filter(phone_e164=identifier).first()
         created = user is None
         if created:
             if not options["password"]:

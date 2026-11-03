@@ -23,6 +23,7 @@ class ScanEvent(models.Model):
     message = models.CharField(max_length=255, null=True, blank=True)
     passenger_name = models.CharField(max_length=255, null=True, blank=True)
     trip_title = models.CharField(max_length=255, null=True, blank=True)
+    zone_label = models.CharField(max_length=100, null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -36,6 +37,7 @@ class ScanEvent(models.Model):
             "message": self.message,
             "passengerName": self.passenger_name,
             "tripTitle": self.trip_title,
+            "zoneLabel": self.zone_label,
             "gate": self.gate,
             "occurrenceId": self.occurrence_id,
             "scannedBy": self.scanned_by.full_name if self.scanned_by else None,

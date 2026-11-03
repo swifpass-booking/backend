@@ -49,3 +49,11 @@ class User(models.Model):
 
     def __str__(self):
         return self.full_name
+
+
+class RateCounter(models.Model):
+    """One fixed-window request counter per throttle key; bumped with an atomic UPDATE so workers cannot undercount."""
+
+    key = models.CharField(primary_key=True, max_length=255)
+    count = models.PositiveIntegerField(default=0)
+    expires_at = models.DateTimeField(db_index=True)

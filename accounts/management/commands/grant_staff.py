@@ -15,7 +15,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         identifier = options["identifier"].strip()
-        user = User.objects.filter(email=identifier).first() or User.objects.filter(phone_e164=identifier).first()
+        user = User.objects.filter(email__iexact=identifier).first() or User.objects.filter(phone_e164=identifier).first()
         if not user:
             raise CommandError(f"No account for {identifier}.")
         if not Provider.objects.filter(id=options["provider"]).exists():

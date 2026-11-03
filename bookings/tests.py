@@ -1,6 +1,5 @@
 import json
 
-from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -12,7 +11,6 @@ from .models import Booking, Ticket
 
 class SecurityTests(TestCase):
     def setUp(self):
-        cache.clear()
         provider = Provider.objects.create(id="p1", legal_name="P", display_name="P", adapter_key="x")
         service = Service.objects.create(id="s1", provider=provider, mode="bus", title="KTM-PKR")
         self.occ = Occurrence.objects.create(
@@ -53,8 +51,8 @@ class SecurityTests(TestCase):
 
     def test_idempotent_retry(self):
         a = self._book(key="k1")
-        b = self._book(key="k1")
-        self.assertEqual(a.json()["reference"], b.json()["reference"])
+        b = self._book(key="k1")  # payment already started: same booking, same payment
+        self.assertEqual((a.status_code, b.status_code), (201, 200))
         self.assertEqual(Booking.objects.count(), 1)
         self.occ.refresh_from_db()
         self.assertEqual(self.occ.seats_sold, 1)
@@ -63,7 +61,6 @@ class SecurityTests(TestCase):
 @override_settings(DEMO_INSTANT_PAYMENT=True)
 class SeatSelectionTests(TestCase):
     def setUp(self):
-        cache.clear()
         provider = Provider.objects.create(id="p1", legal_name="P", display_name="P", adapter_key="x")
         service = Service.objects.create(
             id="s1", provider=provider, mode="bus", title="KTM-PKR", attributes={"coachType": "deluxe"}
@@ -114,7 +111,6 @@ class SeatSelectionTests(TestCase):
 
 class PaymentBypassTests(TestCase):
     def setUp(self):
-        cache.clear()
         provider = Provider.objects.create(id="p1", legal_name="P", display_name="P", adapter_key="x")
         service = Service.objects.create(id="s1", provider=provider, mode="bus", title="KTM-PKR")
         Occurrence.objects.create(
@@ -143,9 +139,6 @@ class PaymentBypassTests(TestCase):
 
 
 class AuthTests(TestCase):
-    def setUp(self):
-        cache.clear()
-
     def _post(self, path, body, **kw):
         return self.client.post(path, data=json.dumps(body), content_type="application/json", **kw)
 
@@ -171,7 +164,6 @@ class AuthTests(TestCase):
 @override_settings(DEMO_INSTANT_PAYMENT=True)
 class PassportTests(TestCase):
     def setUp(self):
-        cache.clear()
         provider = Provider.objects.create(id="p2", legal_name="P", display_name="P", adapter_key="x")
         ktm = Place.objects.create(id="pl_ktm", kind="airport", code="KTM", name="TIA", city="Kathmandu", country="NP", timezone="Asia/Kathmandu")
         pkr = Place.objects.create(id="pl_pkr", kind="airport", code="PKR", name="Pokhara", city="Pokhara", country="NP", timezone="Asia/Kathmandu")

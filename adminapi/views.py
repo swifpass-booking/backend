@@ -20,7 +20,7 @@ def stats(request):
     by_mode = {row["mode"]: row["n"] for row in confirmed.values("mode").annotate(n=Count("id"))}
     bookings_by_mode = [{"mode": m, "count": by_mode.get(m, 0)} for m in MODE_ORDER]
 
-    recent = confirmed.order_by("-created_at")[:6]
+    recent = confirmed.order_by("-created_at").select_related("zone").prefetch_related("passengers", "tickets__passenger")[:6]
 
     return JsonResponse(
         {
@@ -39,11 +39,11 @@ def stats(request):
 @require_http_methods(["GET"])
 @require_admin
 def users(request):
-    rows = User.objects.order_by("-created_at")[:200]
+    rows = User.objects.annotate(booking_count=Count("bookings")).order_by("-created_at")[:200]
     return JsonResponse(
         {
             "users": [
-                {**u.to_public_dict(), "createdAt": u.created_at.isoformat(), "bookingCount": u.bookings.count()}
+                {**u.to_public_dict(), "createdAt": u.created_at.isoformat(), "bookingCount": u.booking_count}
                 for u in rows
             ]
         }
@@ -77,5 +77,5 @@ def occurrences(request):
 @require_http_methods(["GET"])
 @require_admin
 def bookings(request):
-    rows = Booking.objects.order_by("-created_at")[:200]
+    rows = Booking.objects.order_by("-created_at").select_related("zone").prefetch_related("passengers", "tickets__passenger")[:200]
     return JsonResponse({"bookings": [b.to_dict() for b in rows]})

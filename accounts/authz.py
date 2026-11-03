@@ -7,6 +7,7 @@ Every check fails closed: if OpenFGA is unset or unreachable the answer is "no".
 """
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -126,8 +127,22 @@ def can_track(user_id, occurrence_id):
     return _occurrence_check(user_id, "can_track", occurrence_id)
 
 
+_staff_cache = {}  # user id -> (expires, ids). shortcut: a revoked role stays usable up to STAFF_CACHE_SECONDS in other workers; cleared here on every write.
+STAFF_CACHE_SECONDS = 30
+
+
 def staff_provider_ids(user_id):
     """Ids of every provider this user may operate (all of them for a platform admin)."""
+    hit = _staff_cache.get(user_id)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+    ids = _staff_provider_ids(user_id)
+    if ids:  # never cache a denial: it may be OpenFGA being down
+        _staff_cache[user_id] = (time.monotonic() + STAFF_CACHE_SECONDS, ids)
+    return ids
+
+
+def _staff_provider_ids(user_id):
     ids = _all_provider_ids()
     body = {
         "type": "provider",
@@ -150,6 +165,7 @@ def _write(writes=(), deletes=()):
     if deletes:
         body["deletes"] = {"tuple_keys": list(deletes)}
     _request("POST", f"/stores/{store_id()}/write", body)
+    _staff_cache.clear()
 
 
 def _write_ignoring_existing(tuple_key):

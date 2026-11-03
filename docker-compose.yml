@@ -71,7 +71,10 @@ services:
       AGENT_CORS_ORIGINS: http://localhost:8088
 
   frontend:
-    build: ../frontend
+    build:
+      context: ../frontend
+      args:
+        VITE_DEMO_CARD: "1"  # this preview's backend runs in demo mode, so show the card form
     depends_on: [backend, agent]
     ports:
       - "8088:80"

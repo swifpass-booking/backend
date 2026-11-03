@@ -67,7 +67,6 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "corsheaders",
-    "rest_framework",
     "accounts",
     "catalog",
     "bookings",
@@ -119,6 +118,10 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "swiftpass.wsgi.application"
 
+# Number of trusted reverse proxies in front of gunicorn (Render: 1). 0 = use the socket address.
+TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "0"))
+
+# Rate limits live in the database (accounts.RateCounter); the app uses no cache.
 
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
@@ -156,7 +159,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = "UTC"
+# Nepal: "departs on this date" searches cut the day in local time (storage stays UTC via USE_TZ).
+TIME_ZONE = "Asia/Kathmandu"
 
 USE_I18N = True
 
@@ -171,16 +175,6 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
-}
-
-
-# Email
-# https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
-
-MAILERS = {
-    "default": {
-        "BACKEND": "django.core.mail.backends.console.EmailBackend",
-    },
 }
 
 

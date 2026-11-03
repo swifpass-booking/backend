@@ -5,7 +5,6 @@ import os
 import urllib.request
 import uuid
 
-from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -37,7 +36,6 @@ class OpenFGARoleTests(TestCase):
             raise SkipTest("set OPENFGA_TEST_URL to a running OpenFGA to run these tests")
 
     def setUp(self):
-        cache.clear()
         authz._store_id = None
         self._override = override_settings(OPENFGA_STORE_NAME=f"test-{uuid.uuid4().hex[:8]}")
         self._override.enable()

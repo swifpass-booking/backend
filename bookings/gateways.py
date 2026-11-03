@@ -25,7 +25,7 @@ def _http_json(url, *, method="GET", body=None, headers=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json", **(headers or {})})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=8) as resp:
             return json.loads(resp.read().decode() or "{}")
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:300]
@@ -66,6 +66,12 @@ def esewa_start(booking, transaction_uuid: str) -> dict:
     return {"provider": "esewa", "method": "POST", "url": settings.ESEWA_FORM_URL, "fields": fields}
 
 
+def esewa_status(txn, total) -> str | None:
+    """eSewa's own record of one payment (COMPLETE, CANCELED, PENDING, ...)."""
+    query = urllib.parse.urlencode({"product_code": settings.ESEWA_PRODUCT_CODE, "total_amount": total, "transaction_uuid": txn})
+    return _http_json(f"{settings.ESEWA_STATUS_URL}?{query}").get("status")
+
+
 def esewa_check(data_b64: str):
     """Validate the signed callback payload, then confirm with eSewa's status API.
     Returns (transaction_uuid, total_minor) once eSewa itself reports COMPLETE."""
@@ -78,10 +84,9 @@ def esewa_check(data_b64: str):
     if not hmac.compare_digest(_esewa_sign(message), str(payload.get("signature", ""))):
         raise GatewayError("eSewa response signature did not match.")
     txn, total = payload.get("transaction_uuid"), str(payload.get("total_amount", "")).replace(",", "")
-    query = urllib.parse.urlencode({"product_code": settings.ESEWA_PRODUCT_CODE, "total_amount": total, "transaction_uuid": txn})
-    status = _http_json(f"{settings.ESEWA_STATUS_URL}?{query}")
-    if status.get("status") != "COMPLETE":
-        raise GatewayError(f"eSewa reports the payment as {status.get('status', 'unknown')}.")
+    status = esewa_status(txn, total)
+    if status != "COMPLETE":
+        raise GatewayError(f"eSewa reports the payment as {status or 'unknown'}.")
     return txn, round(float(total) * 100)
 
 

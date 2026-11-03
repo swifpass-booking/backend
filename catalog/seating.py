@@ -17,7 +17,6 @@ from .models import PLATFORM_FEE_RATE
 
 # Zones this large are standing/general admission: no seat picking (a stadium stand is not a seat map).
 MAX_SEATED_EVENT_ZONE = 500
-PLATFORM_FEE = PLATFORM_FEE_RATE
 STAY_MODES = ("hotel", "resort", "hall")
 
 
@@ -140,7 +139,7 @@ def build_sections(occurrence, zones=None):
     for z in seated:
         rows = zone_rows(occurrence, z, start_row=next_row)
         next_row += len(rows)
-        fee = round(z.price_minor * PLATFORM_FEE)
+        fee = round(z.price_minor * PLATFORM_FEE_RATE)
         sections.append(
             {
                 "zoneId": z.id,
@@ -158,8 +157,9 @@ def labels_of(sections):
     return [s["label"] for sec in sections for row in sec["rows"] for s in row["seats"] if s]
 
 
-def taken_labels(occurrence, sections):
-    """{label: state} where state is 'sold' (booked or sold before seat tracking) or 'held'."""
+def taken_labels(occurrence, sections, ignore_holds_of=None):
+    """{label: state} where state is 'sold' (booked or sold before seat tracking) or 'held'.
+    `ignore_holds_of`: a user id whose own holds do not count (they are about to book them)."""
     from bookings.models import Passenger
     from carts.models import Hold
 
@@ -183,7 +183,10 @@ def taken_labels(occurrence, sections):
             state.setdefault(label, "sold")
 
     now = timezone.now()
-    for hold in Hold.objects.filter(occurrence=occurrence, expires_at__gt=now):
+    holds = Hold.objects.filter(occurrence=occurrence, expires_at__gt=now)
+    if ignore_holds_of:
+        holds = holds.exclude(user_id=ignore_holds_of)
+    for hold in holds:
         for label in hold.seat_labels or []:
             state.setdefault(label, "held")
     return state
@@ -217,10 +220,10 @@ def seatmap(occurrence):
     return sections, flat
 
 
-def pick_default(occurrence, n):
+def pick_default(occurrence, n, ignore_holds_of=None):
     """First n free seats in the base-price zone (what an un-seated booking would have cost)."""
     sections = build_sections(occurrence)
-    taken = taken_labels(occurrence, sections)
+    taken = taken_labels(occurrence, sections, ignore_holds_of)
     ordered = sorted(sections, key=lambda sec: abs(sec["price"]["amount"] - occurrence.base_price_minor))
     for sec in ordered:
         free = [

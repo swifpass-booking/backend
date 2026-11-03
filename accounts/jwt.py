@@ -12,8 +12,8 @@ def issue_token(user):
     return jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
 
 
-def decode_token(token):
-    """Returns the user id (`sub`), or None if the token is invalid, expired,
+def decode_user(token):
+    """Returns the User, or None if the token is invalid, expired,
     or revoked (user's token_version moved past the token's `ver`)."""
     from .models import User
 
@@ -24,7 +24,11 @@ def decode_token(token):
     sub = payload.get("sub")
     if not sub:
         return None
-    current = User.objects.filter(id=sub).values_list("token_version", flat=True).first()
-    if current is None or payload.get("ver") != current:
-        return None
-    return sub
+    user = User.objects.filter(id=sub).first()
+    return user if user and payload.get("ver") == user.token_version else None
+
+
+def decode_token(token):
+    """The user id behind a valid token, or None."""
+    user = decode_user(token)
+    return user.id if user else None

@@ -166,6 +166,11 @@ class InventoryZone(models.Model):
     price_minor = models.IntegerField()
     capacity = models.IntegerField()
     is_reserved_seating = models.BooleanField(default=False)
+    # Bought by count (bookings with a zoneId); seated zones track who holds which seat label instead.
+    seats_sold = models.IntegerField(default=0)
+
+    def seats_left(self):
+        return max(self.capacity - self.seats_sold - self.held_seats(), 0)
 
     def is_seated(self):
         """Reserved seating flag AND small enough that travellers can pick a seat (see catalog.seating)."""
@@ -180,17 +185,20 @@ class InventoryZone(models.Model):
 
         from carts.models import Hold
 
-        return sum(
-            h.qty for h in Hold.objects.filter(zone=self, expires_at__gt=timezone.now())
-        )
+        # `active_holds` is set by search's Prefetch, so a page of offers needs one query, not one per zone.
+        holds = getattr(self, "active_holds", None)
+        if holds is None:
+            holds = Hold.objects.filter(zone=self, expires_at__gt=timezone.now())
+        return sum(h.qty for h in holds)
 
     def to_dict(self):
-        available = max(self.capacity - self.held_seats(), 0)
+        available = self.seats_left()
         return {
             "id": self.id,
             "code": self.code,
             "label": self.label,
             "price": {"amount": self.price_minor, "currency": "NPR"},
+            "fee": {"amount": round(self.price_minor * PLATFORM_FEE_RATE), "currency": "NPR"},
             "seatsAvailable": available,
             "isReservedSeating": self.is_seated(),
         }
