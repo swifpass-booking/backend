@@ -305,6 +305,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         self.rng = random.Random(opts["seed"])
+        self.existing = set(Occurrence.objects.values_list("id", flat=True))  # one query, not one per candidate trip
         self.days = opts["days"]
         today = timezone.now().astimezone(KTM_TZ).date()
         self.dates = [today + timedelta(days=i) for i in range(self.days)]
@@ -358,11 +359,12 @@ class Command(BaseCommand):
     def _emit(self, svc, mode, departs, duration, price_npr, capacity, zones, gates_before=None):
         """Create one occurrence + its zones if it does not exist yet. zones: [(code,label,npr,cap,reserved)]."""
         occ_id = f"occ_{svc.id[4:]}_{departs:%Y%m%d%H%M}"[:32]
-        if Occurrence.objects.filter(id=occ_id).exists():
+        if occ_id in self.existing:
             return
         if departs <= timezone.now():
             return
         sold = int(capacity * self.rng.uniform(0.05, 0.75))
+        self.existing.add(occ_id)
         occ = Occurrence.objects.create(
             id=occ_id, service=svc, mode=mode, departs_at=departs,
             arrives_at=departs + timedelta(minutes=duration),

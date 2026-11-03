@@ -176,6 +176,38 @@ def _write_ignoring_existing(tuple_key):
             raise
 
 
+def _delete_ignoring_missing(tuple_key):
+    try:
+        _write(deletes=[tuple_key])
+    except AuthzError as e:
+        if "not exist" not in str(e):
+            raise
+
+
+def revoke_admin(user):
+    _delete_ignoring_missing({"user": _user(user.id), "relation": "admin", "object": PLATFORM})
+    _reset_label_if_powerless(user)
+
+
+def revoke_staff(user, provider_id=None):
+    """Remove the user's staff rights on one provider, or on every provider when `provider_id` is None."""
+    provider_ids = [provider_id] if provider_id else _all_provider_ids()
+    for pid in provider_ids:
+        for relation in STAFF_RELATIONS:
+            _delete_ignoring_missing({"user": _user(user.id), "relation": relation, "object": f"provider:{pid}"})
+    _reset_label_if_powerless(user)
+
+
+def _reset_label_if_powerless(user):
+    """Keep User.role (which picks the console the web app opens) in line with the rights that remain."""
+    if is_admin(user.id):
+        return
+    if not _staff_provider_ids(user.id):
+        _set_label(user, "traveller")
+    elif user.role not in STAFF_RELATIONS:  # e.g. a former admin who is still a gate agent
+        _set_label(user, "operator_staff")
+
+
 def grant_admin(user):
     _write_ignoring_existing({"user": _user(user.id), "relation": "admin", "object": PLATFORM})
     _set_label(user, "admin")

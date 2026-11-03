@@ -64,7 +64,9 @@ services:
     branch: main
     rootDir: agent-project
     buildCommand: pip install -r requirements-server.txt
-    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips "*"
+    # No --proxy-headers: uvicorn would replace the caller's address with the first (spoofable) X-Forwarded-For entry.
+    # server.py reads the address itself, taking the TRUSTED_PROXY_HOPS-th entry from the right.
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT --no-proxy-headers
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.9
@@ -76,6 +78,10 @@ services:
         value: groq
       - key: AGENT_CORS_ORIGINS
         value: https://swiftpass-web.onrender.com
+      # Proxies in front of the agent (Render's edge; a static-site rewrite in front may add one more). Check with
+      # two different clients after deploy: they must get separate rate-limit buckets.
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"
       - key: GROQ_API_KEY
         sync: false
 

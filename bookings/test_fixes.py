@@ -514,3 +514,272 @@ class StaffCacheTests(TestCase):
             self.assertEqual((authz.staff_provider_ids("u2"), authz.staff_provider_ids("u2")), ([], ["p2"]))
             self.assertEqual(ask.call_count, 3)
         authz._staff_cache.clear()
+
+
+class SeedStaysTests(TestCase):
+    def test_running_it_again_keeps_nights_and_their_sales(self):
+        from django.core.management import call_command
+        call_command("seed_stays", verbosity=0)
+        night = Occurrence.objects.filter(mode="hotel").order_by("departs_at").first()
+        Occurrence.objects.filter(pk=night.pk).update(seats_sold=3)
+        count = Occurrence.objects.count()
+        call_command("seed_stays", verbosity=0)
+        night.refresh_from_db()
+        self.assertEqual((Occurrence.objects.count(), night.seats_sold, night.departs_at), (count, 3, night.departs_at))
+
+    def test_ids_fit_their_columns(self):
+        from django.core.management import call_command
+        call_command("seed_stays", verbosity=0)
+        self.assertLessEqual(max(len(i) for i in Occurrence.objects.values_list("id", flat=True)), 32)
+        self.assertLessEqual(max(len(i) for i in InventoryZone.objects.values_list("id", flat=True)), 32)
+
+
+class CartHandoffTests(Base):
+    def test_cart_items_name_the_held_zone(self):
+        cart_id = self.post("/v1/carts", {}, self.alice).json()["cartId"]
+        hold = self.post("/v1/holds", {"occurrenceId": "occ_1", "zoneId": "z1", "qty": 1}, self.alice).json()
+        cart = self.post(f"/v1/carts/{cart_id}/items", {"holdId": hold["holdId"]}, self.alice).json()
+        self.assertEqual(cart["items"][0]["zoneId"], "z1")
+
+
+class RevokeAccessTests(TestCase):
+    def setUp(self):
+        from accounts import authz
+        self.authz = authz
+        authz._staff_cache.clear()
+        Provider.objects.create(id="pa", legal_name="A", display_name="A", adapter_key="x")
+        self.user = User.objects.create(email="staff@x.co", full_name="s", password_hash="x", role="gate_agent")
+
+    def test_revoke_deletes_both_staff_relations_and_tolerates_missing_tuples(self):
+        calls = []
+
+        def fake_write(writes=(), deletes=()):
+            calls.extend(t["relation"] for t in deletes)
+            raise self.authz.AuthzError("cannot delete a tuple which does not exist")  # one of the two never existed
+
+        with mock.patch.object(self.authz, "_write", fake_write), \
+             mock.patch.object(self.authz, "is_admin", return_value=False), \
+             mock.patch.object(self.authz, "_staff_provider_ids", return_value=[]):
+            self.authz.revoke_staff(self.user, "pa")
+        self.assertEqual(sorted(calls), ["gate_agent", "operator_staff"])
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.role, "traveller")
+
+    def test_label_stays_while_other_rights_remain(self):
+        with mock.patch.object(self.authz, "_write"), \
+             mock.patch.object(self.authz, "is_admin", return_value=False), \
+             mock.patch.object(self.authz, "_staff_provider_ids", return_value=["pb"]):
+            self.authz.revoke_staff(self.user, "pa")
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.role, "gate_agent")
+
+    def test_a_real_failure_is_not_swallowed(self):
+        with mock.patch.object(self.authz, "_write", side_effect=self.authz.AuthzError("HTTP 500")):
+            with self.assertRaises(self.authz.AuthzError):
+                self.authz.revoke_staff(self.user, "pa")
+
+
+class SeedRealDataTests(TestCase):
+    def reseed_queries(self, days):
+        from django.core.management import call_command
+        call_command("seed_real_data", "--days", str(days), verbosity=0)
+        with CaptureQueriesContext(connection) as queries:
+            call_command("seed_real_data", "--days", str(days), verbosity=0)
+        return len(queries)
+
+    def test_reseeding_adds_nothing_and_costs_no_query_per_trip(self):
+        from django.core.management import call_command
+        call_command("seed_real_data", "--days", "2", verbosity=0)
+        count = Occurrence.objects.count()
+        call_command("seed_real_data", "--days", "2", verbosity=0)
+        self.assertEqual(Occurrence.objects.count(), count)
+        # Fixed catalog upserts only: tripling the days must not triple the queries (it did, one exists() per trip).
+        self.assertLess(self.reseed_queries(6), self.reseed_queries(2) + 50)
+
+
+class SetPasswordCommandTests(Base):
+    def test_new_password_works_and_old_tokens_stop(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+        user = self.alice
+        old_token = issue_token(user)
+        call_command("set_password", identifier="alice@x.co", password="Tr1cky-Pass-92", verbosity=0)
+        login = self.post("/v1/auth/login", {"identifier": "alice@x.co", "password": "Tr1cky-Pass-92"})
+        self.assertEqual(login.status_code, 200)
+        me = self.client.get("/v1/auth/me", HTTP_AUTHORIZATION=f"Bearer {old_token}")
+        self.assertEqual(me.status_code, 401)
+        with self.assertRaises(CommandError):
+            call_command("set_password", identifier="alice@x.co", password="short", verbosity=0)
+
+
+class OfferCapacityTests(Base):
+    def test_offers_report_their_capacity_so_the_card_can_show_how_full_they_are(self):
+        Occurrence.objects.filter(pk=self.occ.pk).update(seats_sold=1)
+        offer = self.client.post("/v1/search", json.dumps({"legs": [{}]}), content_type="application/json").json()["offers"][0]
+        self.assertEqual((offer["capacity"], offer["seatsAvailable"]), (2, 1))
+
+
+class StayClockTests(TestCase):
+    def test_check_in_is_14_00_in_kathmandu_and_early_seeds_are_corrected(self):
+        from django.core.management import call_command
+        call_command("seed_stays", verbosity=0)
+        night = Occurrence.objects.filter(mode="hotel").order_by("departs_at").first()
+        self.assertEqual(timezone.localtime(night.departs_at).strftime("%H:%M"), "14:00")
+        # An early seed stored the same night at 14:00 UTC (7:45 PM in Kathmandu): reseeding moves only the clock time.
+        Occurrence.objects.filter(pk=night.pk).update(
+            departs_at=timezone.localtime(night.departs_at).replace(hour=19, minute=45), seats_sold=2)
+        count = Occurrence.objects.count()
+        call_command("seed_stays", verbosity=0)
+        night.refresh_from_db()
+        self.assertEqual(timezone.localtime(night.departs_at).strftime("%H:%M"), "14:00")
+        self.assertEqual((night.seats_sold, Occurrence.objects.count()), (2, count))
+        halls = Occurrence.objects.filter(mode="hall").first()
+        self.assertEqual(timezone.localtime(halls.departs_at).strftime("%H:%M"), "09:00")
+
+
+class ReconcileTests(Base):
+    """Customers who paid at the gateway but never came back to the site."""
+
+    def pending(self, payment="esewa"):
+        started = {"provider": "khalti", "method": "GET", "url": "https://pay.example/k", "pidx": "pidx-1"}
+        with mock.patch("bookings.gateways.khalti_start", return_value=started):
+            res = self.post("/v1/bookings", {
+                "offer": {"occurrenceId": "occ_1"}, "names": ["Asha Rai"], "phone": "9800000000",
+                "payment": payment, "total": {"amount": 105000, "currency": "NPR"},
+            }, self.alice)
+        self.assertEqual(res.status_code, 201, res.content)
+        return Booking.objects.get()
+
+    def run_reconcile(self, esewa="COMPLETE", khalti=("Completed", 105000)):
+        from .reconcile import reconcile
+        with mock.patch("bookings.gateways.esewa_status", return_value=esewa), \
+             mock.patch("bookings.gateways.khalti_check", return_value=khalti):
+            return reconcile()
+
+    def test_paid_but_never_returned_gets_its_tickets(self):
+        booking = self.pending()
+        self.assertEqual(self.run_reconcile(), 1)
+        booking.refresh_from_db()
+        self.assertEqual((booking.status, Ticket.objects.count()), ("confirmed", 1))
+        self.assertEqual(self.run_reconcile(), 0)  # confirmed bookings are not chased again
+
+    def test_unpaid_bookings_are_left_alone(self):
+        booking = self.pending()
+        self.assertEqual(self.run_reconcile(esewa="PENDING"), 0)
+        booking.refresh_from_db()
+        self.assertEqual((booking.status, Ticket.objects.count()), ("pending_payment", 0))
+
+    def test_paid_after_the_sweep_cancelled_it_is_reconfirmed_when_seats_remain(self):
+        booking = self.pending("khalti")
+        _release(booking)
+        self.assertEqual(self.run_reconcile(), 1)
+        booking.refresh_from_db()
+        self.assertEqual((booking.status, Ticket.objects.count()), ("confirmed", 1))
+
+    def test_paid_after_the_seats_went_elsewhere_is_marked_refund_due(self):
+        booking = self.pending()
+        _release(booking)
+        self.assertEqual(self.book(2, self.bob).status_code, 201)  # the trip's 2 seats are sold to someone else
+        self.run_reconcile()
+        booking.refresh_from_db()
+        self.assertEqual((booking.status, booking.to_dict()["refundDue"]), ("cancelled", True))
+        admin = User.objects.create(email="boss@x.co", full_name="Boss", password_hash="x")
+        with mock.patch("accounts.authz.is_admin", return_value=True):
+            rows = self.client.get("/v1/admin/bookings", HTTP_AUTHORIZATION=f"Bearer {issue_token(admin)}").json()["bookings"]
+        self.assertTrue(any(r["refundDue"] for r in rows))
+
+    def test_a_down_gateway_stops_after_three_errors_and_changes_nothing(self):
+        from .reconcile import reconcile
+        for i in range(5):
+            Booking.objects.create(occurrence=self.occ, offer_id="o", mode="bus", title="t", provider_name="p", contact_phone="1",
+                                   payment_method="esewa", payment_ref=f"r{i}", subtotal_minor=1, fees_minor=0, total_minor=1,
+                                   status="pending_payment")
+        with mock.patch("bookings.gateways.esewa_status", side_effect=gateways.GatewayError("down")) as ask:
+            self.assertEqual(reconcile(), 0)
+        self.assertEqual(ask.call_count, 3)
+        self.assertEqual(Booking.objects.filter(status="pending_payment").count(), 5)
+
+    def test_old_abandoned_checkouts_do_not_crowd_out_a_recent_payment(self):
+        from .reconcile import reconcile
+        paid = self.pending()
+        for i in range(40):
+            Booking.objects.create(occurrence=self.occ, offer_id="o", mode="bus", title="t", provider_name="p", contact_phone="1",
+                                   payment_method="esewa", payment_ref=f"old{i}", subtotal_minor=1, fees_minor=0, total_minor=1,
+                                   status="cancelled")
+        Booking.objects.exclude(pk=paid.pk).update(created_at=timezone.now() - timezone.timedelta(minutes=90))
+        with mock.patch("bookings.gateways.esewa_status", side_effect=lambda ref, total: "COMPLETE" if ref == paid.payment_ref else "PENDING"):
+            reconcile(limit=30)
+        paid.refresh_from_db()
+        self.assertEqual(paid.status, "confirmed")
+
+
+class LookupTests(Base):
+    def test_guest_gets_tickets_with_reference_and_phone_only(self):
+        res = self.post("/v1/bookings", {"offer": {"occurrenceId": "occ_1"}, "names": ["Asha Rai"], "phone": "9800000000",
+                                         "payment": "esewa", "total": {"amount": 105000, "currency": "NPR"}})
+        ref = res.json()["reference"]
+        ask = lambda **b: self.post("/v1/bookings/lookup", b)
+        self.assertEqual(ask(reference=ref.lower(), phone="98000 00000").status_code, 200)  # case and spacing do not matter
+        self.assertEqual(ask(reference=ref, phone="9800000001").status_code, 404)           # wrong phone
+        self.assertEqual(ask(reference="SWP-ZZZZZZ", phone="9800000000").status_code, 404)  # no such reference
+        self.assertEqual(ask(reference=ref).status_code, 404)
+
+    def test_lookup_is_rate_limited(self):
+        codes = [self.post("/v1/bookings/lookup", {"reference": "SWP-AAAAAA", "phone": "9800000000"}).status_code for _ in range(11)]
+        self.assertEqual((codes[:10], codes[10]), ([404] * 10, 429))
+
+
+class ContinuePaymentTests(Base):
+    def test_pending_bookings_carry_their_payment_so_the_traveller_can_finish_paying(self):
+        res = self.post("/v1/bookings", {"offer": {"occurrenceId": "occ_1"}, "names": ["Asha Rai"], "phone": "9800000000",
+                                         "payment": "esewa", "total": {"amount": 105000, "currency": "NPR"}}, self.alice)
+        gateway = res.json()["gateway"]
+        mine = self.client.get("/v1/bookings/mine", HTTP_AUTHORIZATION=f"Bearer {issue_token(self.alice)}").json()["bookings"][0]
+        self.assertEqual(mine["gateway"], gateway)
+        found = self.post("/v1/bookings/lookup", {"reference": mine["reference"], "phone": "9800000000"}).json()
+        self.assertEqual(found["gateway"], gateway)
+        Booking.objects.update(status="confirmed")
+        mine = self.client.get("/v1/bookings/mine", HTTP_AUTHORIZATION=f"Bearer {issue_token(self.alice)}").json()["bookings"][0]
+        self.assertIsNone(mine["gateway"])
+
+
+class StandardBookingsCountAgainstTheirZoneTests(Base):
+    def setUp(self):
+        super().setUp()
+        InventoryZone.objects.filter(pk="z1").update(capacity=2)
+        InventoryZone.objects.create(id="z_ste", occurrence=self.occ, code="STE", label="Suite", price_minor=300000, capacity=5)
+        Occurrence.objects.filter(pk=self.occ.pk).update(capacity=7)  # 2 standard + 5 suites
+
+    def standard(self, user):
+        return self.post("/v1/bookings", {"offer": {"occurrenceId": "occ_1"}, "names": ["Asha Rai"], "phone": "9800000000",
+                                          "payment": "esewa", "total": {"amount": 105000, "currency": "NPR"}}, user)
+
+    def test_standard_bookings_cannot_exceed_the_standard_zone(self):
+        self.assertEqual(self.standard(self.alice).status_code, 201)
+        self.assertEqual(self.standard(self.bob).status_code, 201)
+        res = self.standard(self.alice)  # the trip still has 5 suites, but no standard place
+        self.assertEqual((res.status_code, res.json()["error"]["code"]), (409, "seat_unavailable"))
+        self.assertEqual(InventoryZone.objects.get(pk="z1").seats_sold, 2)
+
+    def test_retrying_a_standard_booking_with_the_same_key_still_replays_it(self):
+        send = lambda: self.post("/v1/bookings", {"offer": {"occurrenceId": "occ_1"}, "names": ["Asha Rai"], "phone": "9800000000",
+                                                  "payment": "esewa", "total": {"amount": 105000, "currency": "NPR"}},
+                                 self.alice, HTTP_IDEMPOTENCY_KEY="std-1")
+        self.assertEqual(send().status_code, 201)
+        self.assertEqual(send().status_code, 200)  # the server-picked zone must not read as "changed order"
+
+
+class RevokeLabelTests(TestCase):
+    def label_after(self, start, admin, staff):
+        from accounts import authz
+        user = User.objects.create(email=f"{start}{admin}{len(staff)}@x.co", full_name="b", password_hash="x", role=start)
+        with mock.patch.object(authz, "is_admin", return_value=admin), mock.patch.object(authz, "_staff_provider_ids", return_value=staff):
+            authz._reset_label_if_powerless(user)
+        user.refresh_from_db()
+        return user.role
+
+    def test_label_follows_the_remaining_rights(self):
+        self.assertEqual(self.label_after("admin", False, ["pa"]), "operator_staff")   # lost admin, still staff: not the admin console
+        self.assertEqual(self.label_after("gate_agent", False, ["pa"]), "gate_agent")  # a staff label is kept as it is
+        self.assertEqual(self.label_after("gate_agent", False, []), "traveller")        # nothing left
+        self.assertEqual(self.label_after("admin", True, []), "admin")                  # still admin

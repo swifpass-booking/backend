@@ -51,6 +51,7 @@ services:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-preview-django-secret-change-me}
       JWT_SECRET: ${JWT_SECRET:-local-preview-jwt-secret-change-me-0123456789}
       DJANGO_ALLOWED_HOSTS: backend,localhost,127.0.0.1
+      TRUSTED_PROXY_HOPS: "1"  # nginx (the frontend container) is the one proxy in front: rate limits then count real clients
       OPENFGA_API_URL: http://openfga:8080
       OPENFGA_API_TOKEN: ${OPENFGA_API_TOKEN:-local-preview-openfga-key}
       DJANGO_SSL_REDIRECT: "0"  # plain-HTTP preview; real hosts terminate TLS in front
@@ -69,6 +70,7 @@ services:
       SWIFTPASS_API_BASE_URL: http://backend:8000/v1
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       AGENT_CORS_ORIGINS: http://localhost:8088
+      TRUSTED_PROXY_HOPS: "1"  # same: nginx appends the real client address to X-Forwarded-For
 
   frontend:
     build:

@@ -147,6 +147,7 @@ class Occurrence(models.Model):
             "price": {"amount": self.base_price_minor, "currency": "NPR"},
             "fees": {"amount": fees_minor, "currency": "NPR"},
             "seatsAvailable": self.seats_available(),
+            "capacity": self.capacity,
             "hasReservedSeating": any(z.is_seated() for z in zones),
             "zones": [z.to_dict() for z in zones],
             "rankingReason": [],

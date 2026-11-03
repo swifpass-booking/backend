@@ -1,4 +1,5 @@
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
@@ -45,6 +46,7 @@ STAYS = [
 ]
 
 DAYS_AHEAD = 30
+KTM = ZoneInfo("Asia/Kathmandu")  # check-in 14:00 and hall start 09:00 are Kathmandu clock times
 
 
 class Command(BaseCommand):
@@ -59,7 +61,7 @@ class Command(BaseCommand):
                               timezone="Asia/Kathmandu", latitude=lat, longitude=lng),
             )
 
-        today = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = timezone.now().astimezone(KTM).replace(hour=0, minute=0, second=0, microsecond=0)
         for prov_id, prov_name, mode, svc_id, place_id, title, attrs, zones in STAYS:
             Provider.objects.update_or_create(
                 id=prov_id,
@@ -73,21 +75,24 @@ class Command(BaseCommand):
             for day in range(DAYS_AHEAD):
                 start = today + timedelta(days=day, hours=14 if mode != "hall" else 9)
                 end = today + timedelta(days=day + 1, hours=11 if mode != "hall" else 0)
-                occ_id = f"occ_{svc_id[4:]}_{day:02d}"
-                occ, _ = Occurrence.objects.update_or_create(
-                    id=occ_id,
-                    defaults=dict(
-                        service_id=svc_id, mode=mode, departs_at=start,
-                        arrives_at=end if mode != "hall" else start.replace(hour=23),
-                        gates_open_at=start, status="scheduled",
-                        base_price_minor=min(z[2] for z in zones) * 100,
-                        capacity=sum(z[3] for z in zones),
-                    ),
+                arrives = end if mode != "hall" else start.replace(hour=23)
+                # Named by date and create-only: running this every boot must never reset a night that has bookings.
+                night = Occurrence.objects.filter(service_id=svc_id, departs_at__date=start.date())
+                if night.exists():
+                    # Early seeds used UTC midnight, which showed a 14:00 check-in as 7:45 PM: fix only the clock time.
+                    night.exclude(departs_at=start).update(departs_at=start, arrives_at=arrives, gates_open_at=start)
+                    continue
+                occ_id = f"occ_{svc_id[4:]}_{start:%y%m%d}"
+                occ = Occurrence.objects.create(
+                    id=occ_id, service_id=svc_id, mode=mode, departs_at=start,
+                    arrives_at=arrives,
+                    gates_open_at=start, status="scheduled",
+                    base_price_minor=min(z[2] for z in zones) * 100,
+                    capacity=sum(z[3] for z in zones),
                 )
-                for code, label, price, cap in zones:
-                    InventoryZone.objects.update_or_create(
-                        id=f"zon_{occ_id[4:]}_{code.lower()}",
-                        defaults=dict(occurrence=occ, code=code, label=label, price_minor=price * 100,
-                                      capacity=cap, is_reserved_seating=False),
-                    )
+                InventoryZone.objects.bulk_create([
+                    InventoryZone(id=f"zon_{occ_id[4:]}_{code.lower()}", occurrence=occ, code=code, label=label,
+                                  price_minor=price * 100, capacity=cap, is_reserved_seating=False)
+                    for code, label, price, cap in zones
+                ])
         self.stdout.write(self.style.SUCCESS(f"Seeded {len(STAYS)} stay/hall properties x {DAYS_AHEAD} days."))

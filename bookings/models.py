@@ -97,6 +97,9 @@ class Booking(models.Model):
             "subtotal": {"amount": self.subtotal_minor, "currency": self.currency},
             "fees": {"amount": self.fees_minor, "currency": self.currency},
             "total": {"amount": self.total_minor, "currency": self.currency},
+            "paidAt": self.paid_at.isoformat() if self.paid_at else None,
+            # cancelled + paid_at set = the money arrived after the seats were released: it must be refunded by hand
+            "refundDue": self.status == "cancelled" and self.paid_at is not None,
             "createdVia": self.created_via,
             "createdAt": self.created_at.isoformat(),
         }

@@ -166,7 +166,7 @@ def _same_order(booking, occurrence_id, zone_id, count, total_minor, seats):
     labels = sorted(p.seat_label for p in booking.passengers.all() if p.seat_label)
     return (
         booking.occurrence_id == occurrence_id
-        and booking.zone_id == (zone_id or None)
+        and (not zone_id or booking.zone_id == zone_id)  # no zone named: the server picked one, which is fine
         and booking.passenger_count == count
         and booking.total_minor == total_minor
         and (not seats or labels == sorted(seats))
@@ -286,6 +286,12 @@ def create_booking(request):
             if occurrence.seats_available() - sum(h.qty for h in others) < n:
                 return error(409, "seat_unavailable", "Not enough seats left.")
 
+            sections = seating.build_sections(occurrence)
+            if not zone_id and not seats and not sections:
+                # Sold by count and no zone named ("Standard"): count it against the zone that has the base price,
+                # or the standard rooms/places could be oversold up to the whole trip's capacity.
+                base_zone = occurrence.zones.filter(price_minor=occurrence.base_price_minor).order_by("id").first()
+                zone_id = base_zone.id if base_zone else None
             zone = None
             if zone_id:
                 zone = InventoryZone.objects.select_for_update().filter(id=zone_id, occurrence=occurrence).first()
@@ -299,7 +305,6 @@ def create_booking(request):
                 if zone.capacity - zone.seats_sold - sum(h.qty for h in zone_others) < n:
                     return error(409, "seat_unavailable", "Not enough places left in that zone.")
 
-            sections = seating.build_sections(occurrence)
             chosen = list(seats or [])
             if zone:
                 chosen = []
@@ -416,6 +421,12 @@ def verify_payment(request):
     booking = Booking.objects.filter(payment_ref=ref).first()
     if not booking:
         return error(404, "not_found", "No booking matches that payment.")
+    return _settle(booking, paid_minor)
+
+
+def _settle(booking, paid_minor):
+    """The gateway says `paid_minor` was paid for `booking`: confirm it, or deal with a late or wrong payment.
+    Shared by the browser's return (verify_payment) and reconcile_payments, which catches customers who never came back."""
     if booking.status == "confirmed":
         return JsonResponse(booking.to_dict())
     if paid_minor != booking.total_minor:
@@ -491,6 +502,33 @@ def _fail_by_ref(ref, message):
     return error(402, "payment_failed", message)
 
 
+@csrf_exempt
+@require_http_methods(["POST"])
+@throttle("booking-lookup", limit=10, window=3600)  # references are short: this stops guessing
+def lookup_booking(request):
+    """POST /v1/bookings/lookup {reference, phone} — how a guest (no account) gets their tickets back."""
+    body = parse_body(request)
+    if body is None:
+        return error(400, "validation_failed", "Malformed request body.")
+    reference = str(body.get("reference") or "").strip().upper()
+    phone = re.sub(r"[\s\-()]", "", str(body.get("phone") or ""))
+    booking = (
+        Booking.objects.filter(reference=reference, contact_phone=phone, status__in=["confirmed", "pending_payment"])
+        .select_related("zone")
+        .first()
+        if reference and phone
+        else None
+    )
+    if not booking:  # one answer for "no such reference" and "wrong phone", so neither can be probed
+        return error(404, "not_found", "No booking matches that reference and phone number.")
+    return JsonResponse({**booking.to_dict(), "gateway": _open_payment(booking)})
+
+
+def _open_payment(booking):
+    """Where to send a traveller to finish paying a still-pending booking (None otherwise)."""
+    return booking.gateway_info if booking.status == "pending_payment" else None
+
+
 @require_http_methods(["GET"])
 def my_bookings(request):
     """GET /v1/bookings/mine — the signed-in traveller's bookings, upcoming first."""
@@ -509,5 +547,6 @@ def my_bookings(request):
     for b in rows:
         d = b.to_dict()
         d["upcoming"] = bool(b.departs_at and b.departs_at >= now)
+        d["gateway"] = _open_payment(b)
         out.append(d)
     return JsonResponse({"bookings": out})

@@ -107,6 +107,12 @@ class OpenFGARoleTests(TestCase):
         self.assertEqual(self._post(self.staff_a, "/v1/occurrences/occ_b/tracking", body).status_code, 403)
         self.assertNotEqual(self._post(self.staff_a, "/v1/occurrences/occ_a/tracking", body).status_code, 403)
 
+    def test_revoking_staff_removes_access_and_the_label(self):
+        authz.revoke_staff(self.staff_a, "pa")
+        self.staff_a.refresh_from_db()
+        self.assertEqual(self._get(self.staff_a, "/v1/scan/occurrences").status_code, 403)
+        self.assertEqual(self.staff_a.role, "traveller")
+
     def test_checks_fail_closed_when_openfga_is_down(self):
         with override_settings(OPENFGA_API_URL="http://127.0.0.1:9"), self.assertLogs("accounts.authz", "ERROR"):
             self.assertEqual(self._get(self.admin, "/v1/admin/stats").status_code, 403)

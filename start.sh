@@ -5,8 +5,11 @@ set -euo pipefail
 
 python manage.py migrate --noinput
 python manage.py seed_real_data
+python manage.py seed_stays
+# Cold starts are frequent on the free plan: use one to settle payments whose browser-return never reached us.
+python manage.py reconcile_payments --limit 30 || echo "Payment reconcile skipped."
 if [[ -n "${OPENFGA_API_URL:-}" ]]; then
-  python manage.py openfga_setup && python manage.py openfga_sync || echo "OpenFGA setup failed: staff and admin checks will be denied until it succeeds."
+  python manage.py openfga_setup || echo "OpenFGA setup failed: staff and admin checks will be denied until it succeeds."
 else
   echo "OPENFGA_API_URL is not set: every admin and staff check will be denied."
 fi

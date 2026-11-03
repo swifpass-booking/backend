@@ -7,6 +7,7 @@ from catalog.models import Provider
 
 class Command(BaseCommand):
     help = (
+        "ONE-TIME, run by hand (start.sh must not run it: it would re-grant every provider to every staff member on each deploy). "
         "Copy the legacy User.role column into OpenFGA tuples. Admins become platform admins. Staff had no "
         "provider before, so they are granted every existing provider; narrow them with grant_staff afterwards."
     )

@@ -92,6 +92,7 @@ class CartItem(models.Model):
             "legIndex": self.leg_index,
             "offer": self.occurrence.to_offer_dict(),
             "holdId": self.hold_id,
+            "zoneId": self.hold.zone_id,
             "seatLabels": self.seat_labels,
             "qty": self.qty,
             "lineTotal": {"amount": self.subtotal_minor() + self.fees_minor(), "currency": "NPR"},
