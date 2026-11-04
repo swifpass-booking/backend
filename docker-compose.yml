@@ -1,6 +1,7 @@
 # Full stack for a local preview: `docker compose up --build`, then open http://localhost:8088
-# Expects the sibling repos checked out next to this one (../frontend, ../model).
-# Optional: put GROQ_API_KEY=... in backend/.env to enable the voice/chat agent.
+# Expects the sibling repos checked out next to this one (../frontend, ../models).
+# Backend settings: backend/.env. Agent settings (SWIFTPASS_AI_MODE local|remote, API keys):
+# .../models/agent-project/.env (copy .env.example).
 name: swiftpass
 
 services:
@@ -66,9 +67,10 @@ services:
 
   agent:
     build: ../models/agent-project
+    env_file: ../models/agent-project/.env
     environment:
       SWIFTPASS_API_BASE_URL: http://backend:8000/v1
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OLLAMA_HOST: http://host.docker.internal:11434  # local mode: Ollama on the host
       AGENT_CORS_ORIGINS: http://localhost:8088
       TRUSTED_PROXY_HOPS: "1"  # same: nginx appends the real client address to X-Forwarded-For
 
