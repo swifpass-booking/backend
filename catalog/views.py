@@ -64,8 +64,9 @@ def search(request):
         ).prefetch_related(
             "zones", Prefetch("zones__holds", queryset=Hold.objects.filter(expires_at__gt=timezone.now()), to_attr="active_holds")
         ).filter(status="scheduled")
-        # No date given: everything that hasn't departed yet.
-        qs = qs.filter(departs_at__date=the_date) if the_date else qs.filter(departs_at__gte=timezone.now())
+        qs = qs.filter(departs_at__gt=timezone.now())  # never list what already left (even for today): create_booking would refuse it
+        if the_date:
+            qs = qs.filter(departs_at__date=the_date)
 
         if modes:
             qs = qs.filter(mode__in=modes)
@@ -146,7 +147,7 @@ def places(request):
 def featured(request):
     """GET /v1/featured — up to 4 upcoming offers, one per mode first (home page highlights)."""
     upcoming = (
-        Occurrence.objects.filter(status="scheduled", departs_at__gte=timezone.now())
+        Occurrence.objects.filter(status="scheduled", departs_at__gt=timezone.now())
         .select_related("service", "service__provider", "service__origin_place", "service__dest_place", "service__venue_place")
         .order_by("departs_at")
     )

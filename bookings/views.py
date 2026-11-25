@@ -48,8 +48,8 @@ def _card_problem(card):
     return None
 
 
-PAYMENT_METHODS = {"esewa", "khalti", "fonepay", "card"}
-GATEWAY_METHODS = {"esewa", "khalti", "fonepay"}  # real redirect flow on web; other methods stay instant-confirm
+PAYMENT_METHODS = {"esewa", "khalti", "fonepay", "stripe", "card"}
+GATEWAY_METHODS = {"esewa", "khalti", "fonepay", "stripe"}  # real redirect flow on web; other methods stay instant-confirm
 MAX_PASSENGERS = 9
 
 
@@ -128,6 +128,9 @@ def _start_gateway(booking):
     elif booking.payment_method == "fonepay":
         ref = f"{booking.reference}-{secrets.token_hex(3)}"
         info = gateways.fonepay_start(booking, ref)
+    elif booking.payment_method == "stripe":
+        info = gateways.stripe_start(booking)
+        ref = info["sessionId"]
     else:
         info = gateways.khalti_start(booking)
         ref = info["pidx"]
@@ -413,6 +416,16 @@ def verify_payment(request):
                 if status in ("User canceled", "Expired", "Refunded"):
                     return _fail_by_ref(ref, f"Khalti payment {status.lower()}.")
                 return error(402, "payment_pending", f"Khalti reports the payment as {status}.")
+        elif provider == "stripe":
+            # Cancelling is not released here: the unsigned browser must not free someone's seats. The stale sweep does.
+            if body.get("failed") and not body.get("sessionId"):
+                return error(402, "payment_failed", "Stripe payment was cancelled.")
+            ref = str(body.get("sessionId") or "")
+            status, paid_minor = gateways.stripe_check(ref)
+            if status == "expired":
+                return _fail_by_ref(ref, "Stripe checkout expired.")
+            if status != "paid":
+                return error(402, "payment_pending", "Stripe has not received the payment yet.")
         else:
             return error(400, "validation_failed", "Unknown payment provider.")
     except gateways.GatewayError as e:
@@ -550,3 +563,110 @@ def my_bookings(request):
         d["gateway"] = _open_payment(b)
         out.append(d)
     return JsonResponse({"bookings": out})
+
+
+def _apply_refund(booking, refund_id):
+    """Mark a paid booking refunded: give a still-confirmed booking's seats back and void its tickets. Idempotent."""
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().get(pk=booking.pk)
+        if booking.status == "refunded":
+            return booking
+        if booking.status == "confirmed":  # a cancelled one (paid late) already gave its seats back
+            Occurrence.objects.filter(pk=booking.occurrence_id).update(seats_sold=F("seats_sold") - booking.passenger_count)
+            if booking.zone_id:
+                InventoryZone.objects.filter(pk=booking.zone_id).update(seats_sold=F("seats_sold") - booking.passenger_count)
+            booking.tickets.update(status="void")
+        booking.status = "refunded"
+        booking.gateway_info = {**(booking.gateway_info or {}), "refundId": refund_id}
+        booking.save(update_fields=["status", "gateway_info"])
+    return booking
+
+
+def refund_booking(booking):
+    """Refund a paid Stripe booking in full (admin action). Other gateways are refunded in their own dashboards."""
+    if booking.status == "refunded":
+        return JsonResponse(booking.to_dict())
+    if booking.payment_method != "stripe" or not booking.paid_at or booking.status not in ("confirmed", "cancelled"):
+        return error(409, "not_refundable", "Only paid Stripe bookings can be refunded here.")
+    if booking.tickets.filter(status="redeemed").exists():
+        return error(409, "ticket_used", "A ticket on this booking was already used.")
+    try:
+        refund_id = gateways.stripe_refund(booking)
+    except gateways.GatewayError as e:
+        return error(502, "refund_failed", str(e))
+    return JsonResponse(_apply_refund(booking, refund_id).to_dict())
+
+
+def _handle_stripe_event(event):
+    """Apply one verified Stripe event. Every branch is idempotent: Stripe retries and may send duplicates."""
+    kind, obj = event.get("type"), (event.get("data") or {}).get("object") or {}
+    ref = obj.get("id")
+    if kind in ("checkout.session.completed", "checkout.session.async_payment_succeeded") and obj.get("payment_status") == "paid":
+        booking = Booking.objects.filter(payment_ref=ref).first()
+        if booking:
+            res = _settle(booking, int(obj.get("amount_total") or 0))
+            if res.status_code >= 400:
+                log.error("Stripe payment %s could not settle booking %s: %s", ref, booking.reference, res.content[:200])
+    elif kind in ("checkout.session.expired", "checkout.session.async_payment_failed"):
+        _fail_by_ref(ref, "Stripe payment failed or expired.")
+    elif kind == "charge.refunded" and obj.get("refunded"):  # fully refunded, e.g. from the Stripe dashboard; partial refunds are ignored
+        booking = Booking.objects.filter(reference=(obj.get("metadata") or {}).get("booking_reference") or "", payment_method="stripe", paid_at__isnull=False).first()
+        if booking:
+            _apply_refund(booking, str(obj.get("id")))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def stripe_webhook(request):
+    """Stripe -> us, signed. Settles payments whose browser never came back. Local: `stripe listen --forward-to localhost:8000/v1/payments/stripe/webhook`."""
+    try:
+        event = gateways.stripe_event(request.body, request.headers.get("Stripe-Signature", ""))
+    except gateways.GatewayError as e:
+        return error(400, "bad_signature", str(e))
+    _handle_stripe_event(event)
+    return JsonResponse({"received": True})
+
+
+# What the simulator can do to a pending Stripe payment. Declines change nothing: like real Checkout, the traveller just retries.
+SIM_DECLINES = {
+    "card_declined": "Your card was declined.",
+    "insufficient_funds": "Your card has insufficient funds.",
+    "expired_card": "Your card has expired.",
+    "incorrect_cvc": "Your card's security code is incorrect.",
+    "3ds_failed": "We are unable to authenticate your payment method.",
+    "processing_error": "An error occurred while processing your card. Try again in a little bit.",
+}
+SIM_OUTCOMES = {"succeeded", "abandoned", "session_expired", "paid_late", "amount_mismatch", "webhook_only", *SIM_DECLINES}
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def stripe_simulate(request):
+    """Dev only (STRIPE_SIMULATE): choose how a fake Stripe session ends. Success paths still go through verify_payment."""
+    if not settings.STRIPE_SIMULATE:
+        return error(404, "not_found", "Not found.")
+    body = parse_body(request) or {}
+    sid, outcome = str(body.get("sessionId") or ""), body.get("outcome")
+    booking = Booking.objects.filter(payment_ref=sid).first() if sid.startswith("cs_sim_") else None
+    if not booking or outcome not in SIM_OUTCOMES:
+        return error(400, "validation_failed", "Unknown simulated session or outcome.")
+    if outcome in SIM_DECLINES:
+        return error(402, "card_error", SIM_DECLINES[outcome])
+
+    def mark(value):
+        Booking.objects.filter(pk=booking.pk).update(gateway_info={**booking.gateway_info, "simOutcome": value})
+
+    if outcome == "abandoned":
+        return JsonResponse({"next": "cancel"})
+    if outcome == "session_expired":
+        mark("expired")
+    elif outcome == "amount_mismatch":
+        mark("short")
+    else:
+        if outcome == "paid_late":  # the 15-minute hold ran out before the traveller paid
+            _release(booking)
+        mark("paid")
+        if outcome == "webhook_only":  # the browser never returns: only the (signed-in-real-life) webhook settles it
+            _handle_stripe_event({"type": "checkout.session.completed", "data": {"object": {"id": sid, "payment_status": "paid", "amount_total": booking.total_minor}}})
+            return JsonResponse({"next": "home"})
+    return JsonResponse({"next": "return"})

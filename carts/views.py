@@ -1,3 +1,5 @@
+import functools
+
 from django.db import transaction
 from django.db.models import Q
 from django.http import JsonResponse
@@ -5,12 +7,43 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from accounts.jwt import decode_user
 from accounts.throttle import throttle
-from accounts.views import require_auth
 from catalog.models import InventoryZone, Occurrence
 from swiftpass.http import error, parse_body
 
 from .models import CART_TTL_SECONDS, HOLD_TTL_SECONDS_MAX, Cart, CartItem, Hold
+
+
+def require_owner(view):
+    """Holds and carts belong to a signed-in user or to an anonymous chat (X-Guest-Key = its session id).
+    Browsing and seat choice need neither a password nor an account; only payment requires sign-in."""
+
+    @functools.wraps(view)
+    def wrapped(request, *args, **kwargs):
+        header = request.headers.get("Authorization", "")
+        request.user_id = None
+        if header.startswith("Bearer "):
+            user = decode_user(header[7:])
+            if not user:
+                return error(401, "unauthorised", "Session expired — sign in again.")
+            request.user_id = user.id
+        key = request.headers.get("X-Guest-Key", "").strip()
+        request.guest_key = key if 16 <= len(key) <= 64 else ""
+        if not request.user_id and not request.guest_key:
+            return error(401, "unauthorised", "Start a chat session or sign in first.")
+        return view(request, *args, **kwargs)
+
+    return wrapped
+
+
+def _owner_q(request):
+    q = Q(pk__in=[])
+    if request.user_id:
+        q |= Q(user_id=request.user_id)
+    if request.guest_key:
+        q |= Q(guest_key=request.guest_key)
+    return q
 
 
 def _int(value, default, low, high):
@@ -28,8 +61,8 @@ def _int(value, default, low, high):
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_auth
-@throttle("hold", limit=20, window=600, key_func=lambda r: str(r.user_id))  # per traveller: the voice agent shares one IP
+@require_owner
+@throttle("hold", limit=20, window=600, key_func=lambda r: str(r.user_id or r.guest_key))  # per traveller: the voice agent shares one IP
 def create_hold(request):
     body = parse_body(request)
     if body is None:
@@ -65,7 +98,7 @@ def create_hold(request):
         # One live hold per traveller per trip (unless already in a cart); expired ones are dead weight.
         now = timezone.now()
         Hold.objects.filter(occurrence=occurrence, cart_item__isnull=True).filter(
-            Q(user_id=request.user_id) | Q(expires_at__lte=now)
+            _owner_q(request) | Q(expires_at__lte=now)
         ).delete()
         active = sum(h.qty for h in Hold.objects.filter(occurrence=occurrence, expires_at__gt=now))
         if qty > occurrence.seats_available() - active:
@@ -86,6 +119,7 @@ def create_hold(request):
 
         hold = Hold.objects.create(
             user_id=request.user_id,
+            guest_key=request.guest_key,
             occurrence=occurrence,
             zone=zone,
             seat_labels=seat_labels,
@@ -97,17 +131,17 @@ def create_hold(request):
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_auth
+@require_owner
 def create_cart(request):
-    cart = Cart.objects.create(user_id=request.user_id, expires_at=timezone.now() + timezone.timedelta(seconds=CART_TTL_SECONDS))
+    cart = Cart.objects.create(user_id=request.user_id, guest_key=request.guest_key, expires_at=timezone.now() + timezone.timedelta(seconds=CART_TTL_SECONDS))
     return JsonResponse(cart.to_dict(), status=201)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_auth
+@require_owner
 def add_cart_item(request, cart_id):
-    cart = Cart.objects.filter(id=cart_id, user_id=request.user_id).first()
+    cart = Cart.objects.filter(_owner_q(request), id=cart_id).first()
     if not cart:
         return error(404, "validation_failed", "No such cart.")
 
@@ -115,7 +149,7 @@ def add_cart_item(request, cart_id):
     if body is None:
         return error(400, "validation_failed", "Malformed request body.")
 
-    hold = Hold.objects.filter(id=body.get("holdId"), user_id=request.user_id).first()
+    hold = Hold.objects.filter(_owner_q(request), id=body.get("holdId")).first()
     if not hold:
         return error(400, "validation_failed", "holdId must refer to a hold you created.")
     if hold.is_expired():
@@ -140,9 +174,9 @@ def add_cart_item(request, cart_id):
 
 
 @require_http_methods(["GET"])
-@require_auth
+@require_owner
 def get_cart(request, cart_id):
-    cart = Cart.objects.filter(id=cart_id, user_id=request.user_id).first()
+    cart = Cart.objects.filter(_owner_q(request), id=cart_id).first()
     if not cart:
         return error(404, "validation_failed", "No such cart.")
     return JsonResponse(cart.to_dict())

@@ -1,12 +1,15 @@
 from django.db.models import Count, Sum
 from django.http import JsonResponse
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from accounts.models import User
 from accounts.views import require_admin
 from bookings.models import Booking
+from bookings.views import refund_booking
 from catalog.models import Occurrence
+from swiftpass.http import error
 
 MODE_ORDER = ["air", "bus", "rail", "event", "hotel", "resort", "hall"]
 
@@ -79,3 +82,13 @@ def occurrences(request):
 def bookings(request):
     rows = Booking.objects.order_by("-created_at").select_related("zone").prefetch_related("passengers", "tickets__passenger")[:200]
     return JsonResponse({"bookings": [b.to_dict() for b in rows]})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_admin
+def refund(request, booking_id):
+    booking = Booking.objects.filter(pk=booking_id).first()
+    if not booking:
+        return error(404, "not_found", "No such booking.")
+    return refund_booking(booking)

@@ -1,4 +1,4 @@
-"""eSewa (ePay v2), Khalti (ePayment v2) and Fonepay (dev) sandbox integrations.
+"""eSewa (ePay v2), Khalti (ePayment v2), Fonepay (dev) and Stripe (test mode) integrations.
 
 Both are redirect flows: the booking is created `pending_payment` (seats reserved), the browser is
 sent to the gateway, the gateway sends it back to the frontend, and the frontend calls
@@ -21,9 +21,12 @@ class GatewayError(Exception):
     pass
 
 
-def _http_json(url, *, method="GET", body=None, headers=None):
+def _http_json(url, *, method="GET", body=None, headers=None, form=None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json", **(headers or {})})
+    content_type = "application/json"
+    if form is not None:  # Stripe's API takes form-encoded bodies
+        data, content_type = urllib.parse.urlencode(form).encode(), "application/x-www-form-urlencoded"
+    req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": content_type, **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
             return json.loads(resp.read().decode() or "{}")
@@ -173,3 +176,94 @@ def fonepay_check(q: dict):
     if str(q.get("PS")).lower() != "true" or str(q.get("RC")).lower() != "successful":
         return prn, None
     return prn, round(float(q.get("P_AMT") or 0) * 100)
+
+
+# ---- Stripe (Checkout Sessions, test mode) ----------------------------------
+# Hosted Checkout, same redirect shape as the others: the booking waits as pending_payment, the browser pays on
+# stripe.com, and the payment is confirmed by re-fetching the session (verify_payment) or by the signed webhook.
+# With no STRIPE_SECRET_KEY in DEBUG, STRIPE_SIMULATE fakes Stripe: sessions are `cs_sim_*` and the outcome
+# (card declined, 3DS failed, expired, paid late, ...) is picked on the frontend simulator page.
+def _stripe_headers():
+    if not settings.STRIPE_SECRET_KEY:
+        raise GatewayError("Stripe is not configured — set STRIPE_SECRET_KEY (a sk_test_ key from dashboard.stripe.com/test/apikeys).")
+    return {"Authorization": f"Bearer {settings.STRIPE_SECRET_KEY}"}
+
+
+def stripe_start(booking) -> dict:
+    if settings.STRIPE_SIMULATE:
+        sid = f"cs_sim_{booking.reference}"
+        return {"provider": "stripe", "method": "GET", "url": f"{settings.FRONTEND_BASE_URL}/payment/stripe/sim?session_id={sid}", "sessionId": sid}
+    form = {
+        "mode": "payment",
+        "success_url": f"{settings.FRONTEND_BASE_URL}/payment/stripe?session_id={{CHECKOUT_SESSION_ID}}",
+        "cancel_url": f"{settings.FRONTEND_BASE_URL}/payment/stripe?failed=1",
+        "client_reference_id": booking.reference,
+        "metadata[booking_reference]": booking.reference,
+        "payment_intent_data[metadata][booking_reference]": booking.reference,  # copied onto the charge: charge.refunded finds the booking
+        "line_items[0][quantity]": 1,
+        "line_items[0][price_data][currency]": (settings.STRIPE_CURRENCY or booking.currency).lower(),
+        "line_items[0][price_data][unit_amount]": booking.total_minor,
+        "line_items[0][price_data][product_data][name]": booking.title[:100],
+    }
+    if booking.contact_email:
+        form["customer_email"] = booking.contact_email
+    res = _http_json(f"{settings.STRIPE_API_BASE}/v1/checkout/sessions", method="POST", headers=_stripe_headers(), form=form)
+    if not res.get("id") or not res.get("url"):
+        raise GatewayError("Stripe did not return a checkout link.")
+    return {"provider": "stripe", "method": "GET", "url": res["url"], "sessionId": res["id"]}
+
+
+def stripe_check(session_id: str):
+    """Lookup with Stripe; returns ("paid" | "unpaid" | "expired", total_minor)."""
+    if session_id.startswith("cs_sim_"):
+        if not settings.STRIPE_SIMULATE:
+            raise GatewayError("Simulated Stripe sessions are disabled.")
+        from .models import Booking
+        b = Booking.objects.filter(payment_ref=session_id).first()
+        outcome = (b.gateway_info or {}).get("simOutcome") if b else None
+        if outcome == "expired":
+            return "expired", 0
+        if outcome == "short":  # paid less than the total: exercises the amount check
+            return "paid", b.total_minor - 100
+        return ("paid", b.total_minor) if outcome == "paid" else ("unpaid", 0)
+    res = _http_json(f"{settings.STRIPE_API_BASE}/v1/checkout/sessions/{urllib.parse.quote(session_id, safe='')}", headers=_stripe_headers())
+    if res.get("status") == "expired":
+        return "expired", 0
+    return ("paid" if res.get("payment_status") == "paid" else "unpaid"), int(res.get("amount_total") or 0)
+
+
+def stripe_event(payload: bytes, header: str, now=None) -> dict:
+    """Verify a webhook's Stripe-Signature (HMAC-SHA256 over "<t>.<body>", 5-minute tolerance) and return the event."""
+    if not settings.STRIPE_WEBHOOK_SECRET:
+        raise GatewayError("STRIPE_WEBHOOK_SECRET is not set.")
+    parts = [p.split("=", 1) for p in header.split(",") if "=" in p]
+    stamp = next((v for k, v in parts if k == "t"), "")
+    expected = hmac.new(settings.STRIPE_WEBHOOK_SECRET.encode(), stamp.encode() + b"." + payload, hashlib.sha256).hexdigest()
+    if not stamp.isdigit() or abs((now or time.time()) - int(stamp)) > 300 or not any(
+        hmac.compare_digest(expected, v) for k, v in parts if k == "v1"
+    ):
+        raise GatewayError("Stripe webhook signature did not match.")
+    try:
+        return json.loads(payload)
+    except ValueError:
+        raise GatewayError("Unreadable Stripe webhook body.")
+
+
+def stripe_refund(booking) -> str:
+    """Refund the whole payment and return the refund id. The idempotency key makes a retried click refund once."""
+    ref = booking.payment_ref or ""
+    if ref.startswith("cs_sim_"):
+        if not settings.STRIPE_SIMULATE:
+            raise GatewayError("Simulated Stripe sessions are disabled.")
+        return f"re_sim_{booking.reference}"
+    session = _http_json(f"{settings.STRIPE_API_BASE}/v1/checkout/sessions/{urllib.parse.quote(ref, safe='')}", headers=_stripe_headers())
+    if not session.get("payment_intent"):
+        raise GatewayError("Stripe has no payment to refund for this booking.")
+    res = _http_json(
+        f"{settings.STRIPE_API_BASE}/v1/refunds", method="POST",
+        headers={**_stripe_headers(), "Idempotency-Key": f"refund-{booking.id}"},
+        form={"payment_intent": session["payment_intent"], "amount": booking.total_minor, "metadata[booking_reference]": booking.reference},
+    )
+    if not res.get("id"):
+        raise GatewayError("Stripe did not return a refund.")
+    return res["id"]

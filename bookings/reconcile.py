@@ -24,6 +24,9 @@ def _paid_minor(booking):
     if booking.payment_method == "khalti" and not ref.startswith("demo-"):
         status, paid = gateways.khalti_check(ref)
         return paid if status == "Completed" else None
+    if booking.payment_method == "stripe":
+        status, paid = gateways.stripe_check(ref)
+        return paid if status == "paid" else None
     return None  # Fonepay has no status call (see gateways.fonepay_check)
 
 
@@ -31,7 +34,7 @@ def reconcile(limit=50):
     """Returns how many bookings were settled by this run."""
     since = timezone.now() - LOOKBACK
     candidates = (
-        Booking.objects.filter(payment_method__in=["esewa", "khalti"], payment_ref__isnull=False, paid_at__isnull=True)
+        Booking.objects.filter(payment_method__in=["esewa", "khalti", "stripe"], payment_ref__isnull=False, paid_at__isnull=True)
         .filter(Q(status="pending_payment") | Q(status="cancelled", created_at__gte=since))
         .order_by("-created_at")[:limit]  # newest first: old abandoned checkouts must not crowd out a recent payment
     )

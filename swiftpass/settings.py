@@ -193,6 +193,13 @@ FONEPAY_SECRET_KEY = os.environ.get("FONEPAY_SECRET_KEY", "a7e3512f5032480a83137
 FONEPAY_URL = os.environ.get("FONEPAY_URL", "https://dev-clientapi.fonepay.com/api/merchantRequest")
 KHALTI_SECRET_KEY = os.environ.get("KHALTI_SECRET_KEY", "")
 KHALTI_BASE_URL = os.environ.get("KHALTI_BASE_URL", "https://dev.khalti.com/api/v2")
+# Stripe test mode: sk_test_ key from dashboard.stripe.com/test/apikeys; webhook secret (whsec_) from `stripe listen`.
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_API_BASE = os.environ.get("STRIPE_API_BASE", "https://api.stripe.com").rstrip("/")
+STRIPE_CURRENCY = os.environ.get("STRIPE_CURRENCY", "")  # empty: charge in the booking's currency (NPR)
+# DEBUG with no Stripe key: fake Stripe locally and pick outcomes on /payment/stripe/sim. Never on in production.
+STRIPE_SIMULATE = DEBUG and not STRIPE_SECRET_KEY
 PENDING_PAYMENT_MINUTES = 15
 # --- Authorization (OpenFGA) -------------------------------------------------
 # Roles live in OpenFGA (accounts/openfga_model.json). With OPENFGA_API_URL unset every

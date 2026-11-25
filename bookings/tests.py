@@ -7,6 +7,7 @@ from accounts.models import User
 from catalog.models import InventoryZone, Occurrence, Place, Provider, Service
 
 from .models import Booking, Ticket
+from .views import refund_booking
 
 
 class SecurityTests(TestCase):
@@ -207,3 +208,139 @@ class PassportTests(TestCase):
         self.assertEqual(passenger.passport_last4, "4567")
         self.assertNotIn("PA1234567", passenger.passport_hash)
         self.assertEqual(res.json()["passengers"][0]["passport"], {"numberLast4": "4567", "nationality": "NPL"})
+
+
+@override_settings(STRIPE_SIMULATE=True, STRIPE_SECRET_KEY="", STRIPE_WEBHOOK_SECRET="whsec_test")
+class StripeTests(TestCase):
+    def setUp(self):
+        provider = Provider.objects.create(id="p1", legal_name="P", display_name="P", adapter_key="x")
+        service = Service.objects.create(id="s1", provider=provider, mode="bus", title="KTM-PKR")
+        Occurrence.objects.create(
+            id="occ_1", service=service, mode="bus", departs_at=timezone.now() + timezone.timedelta(days=1),
+            base_price_minor=100000, capacity=5,
+        )
+        res = self.client.post(
+            "/v1/bookings",
+            data=json.dumps({
+                "offer": {"occurrenceId": "occ_1"}, "names": ["Asha Rai"], "phone": "9800000000",
+                "payment": "stripe", "total": {"amount": 105000, "currency": "NPR"},
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 201)
+        self.sid = res.json()["gateway"]["sessionId"]
+        self.booking = Booking.objects.get()
+
+    def _post(self, url, **body):
+        return self.client.post(url, data=json.dumps(body), content_type="application/json")
+
+    def _sim(self, outcome):
+        return self._post("/v1/dev/stripe/simulate", sessionId=self.sid, outcome=outcome)
+
+    def _verify(self):
+        return self._post("/v1/payments/verify", provider="stripe", sessionId=self.sid)
+
+    def test_unpaid_session_is_not_confirmed(self):
+        self.assertEqual(self._verify().status_code, 402)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "pending_payment")
+
+    def test_success_confirms_and_issues_ticket(self):
+        self.assertEqual(self._sim("succeeded").json(), {"next": "return"})
+        self.assertEqual(self._verify().status_code, 200)
+        self.booking.refresh_from_db()
+        self.assertEqual((self.booking.status, Ticket.objects.count()), ("confirmed", 1))
+
+    def test_declines_change_nothing(self):
+        for outcome in ("card_declined", "insufficient_funds", "3ds_failed"):
+            self.assertEqual(self._sim(outcome).status_code, 402)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "pending_payment")
+
+    def test_expired_session_releases_seats(self):
+        self._sim("session_expired")
+        self.assertEqual(self._verify().status_code, 402)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "cancelled")
+        self.assertEqual(Occurrence.objects.get().seats_sold, 0)
+
+    def test_short_payment_rejected(self):
+        self._sim("amount_mismatch")
+        self.assertEqual(self._verify().status_code, 409)
+
+    def test_paid_late_is_recovered_when_seats_free(self):
+        self._sim("paid_late")
+        self.assertEqual(self._verify().status_code, 200)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "confirmed")
+        self.assertEqual(Occurrence.objects.get().seats_sold, 1)
+
+    def test_webhook_only_settles_without_browser(self):
+        self.assertEqual(self._sim("webhook_only").json(), {"next": "home"})
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "confirmed")
+
+    @override_settings(STRIPE_SIMULATE=False)
+    def test_simulator_is_off_outside_dev(self):
+        self.assertEqual(self._sim("succeeded").status_code, 404)
+
+    def _signed(self, event, stamp=None, secret="whsec_test"):
+        import hashlib, hmac, time
+        payload = json.dumps(event).encode()
+        t = str(stamp or int(time.time()))
+        sig = hmac.new(secret.encode(), t.encode() + b"." + payload, hashlib.sha256).hexdigest()
+        return self.client.post("/v1/payments/stripe/webhook", data=payload, content_type="application/json", HTTP_STRIPE_SIGNATURE=f"t={t},v1={sig}")
+
+    def test_webhook_signature_enforced_and_settles(self):
+        event = {"type": "checkout.session.completed", "data": {"object": {"id": self.sid, "payment_status": "paid", "amount_total": 105000}}}
+        self.assertEqual(self._signed(event, secret="wrong").status_code, 400)
+        self.assertEqual(self._signed(event, stamp=1).status_code, 400)  # replayed old timestamp
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "pending_payment")
+        self.assertEqual(self._signed(event).status_code, 200)
+        self.assertEqual(self._signed(event).status_code, 200)  # duplicate delivery
+        self.booking.refresh_from_db()
+        self.assertEqual((self.booking.status, Ticket.objects.count()), ("confirmed", 1))
+
+
+    def _confirm(self):
+        self._sim("succeeded")
+        self._verify()
+        self.booking.refresh_from_db()
+
+    def test_refund_confirmed_booking_frees_seats_and_voids_tickets(self):
+        self._confirm()
+        self.assertEqual(Occurrence.objects.get().seats_sold, 1)
+        res = refund_booking(self.booking)
+        self.assertEqual(res.status_code, 200)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "refunded")
+        self.assertEqual(Occurrence.objects.get().seats_sold, 0)
+        self.assertEqual(Ticket.objects.get().status, "void")
+        self.assertEqual(refund_booking(self.booking).status_code, 200)  # second click: still one refund, seats not freed twice
+        self.assertEqual(Occurrence.objects.get().seats_sold, 0)
+
+    def test_unpaid_or_redeemed_booking_not_refundable(self):
+        self.assertEqual(refund_booking(self.booking).status_code, 409)
+        self._confirm()
+        Ticket.objects.update(status="redeemed")
+        self.assertEqual(refund_booking(self.booking).status_code, 409)
+
+    def test_refund_due_late_payment_is_refundable(self):
+        Booking.objects.filter(pk=self.booking.pk).update(status="cancelled", paid_at=timezone.now())
+        Occurrence.objects.update(seats_sold=0)  # a released booking already gave its seats back
+        self.booking.refresh_from_db()
+        self.assertEqual(refund_booking(self.booking).status_code, 200)
+        self.assertEqual(Occurrence.objects.get().seats_sold, 0)  # not freed twice
+
+    def test_dashboard_refund_webhook(self):
+        self._confirm()
+        charge = {"id": "ch_1", "refunded": True, "metadata": {"booking_reference": self.booking.reference}}
+        self.assertEqual(self._signed({"type": "charge.refunded", "data": {"object": charge}}).status_code, 200)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, "refunded")
+        self.assertEqual(Occurrence.objects.get().seats_sold, 0)
+
+    def test_admin_refund_requires_admin(self):
+        self._confirm()
+        self.assertEqual(self._post(f"/v1/admin/bookings/{self.booking.id}/refund").status_code, 401)

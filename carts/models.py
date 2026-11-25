@@ -19,6 +19,7 @@ class Hold(models.Model):
     user = models.ForeignKey(
         "accounts.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="holds"
     )
+    guest_key = models.CharField(max_length=64, blank=True, default="", db_index=True)  # anonymous owner: the chat session id
     occurrence = models.ForeignKey(Occurrence, on_delete=models.CASCADE, related_name="holds")
     zone = models.ForeignKey(InventoryZone, on_delete=models.CASCADE, related_name="holds")
     seat_labels = models.JSONField(default=list, blank=True)
@@ -48,6 +49,7 @@ class Cart(models.Model):
     user = models.ForeignKey(
         "accounts.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="carts"
     )
+    guest_key = models.CharField(max_length=64, blank=True, default="", db_index=True)  # anonymous owner: the chat session id
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
 

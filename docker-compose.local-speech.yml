@@ -1,0 +1,10 @@
+# Overlay: route /agent/* to the agent running on the host (local Whisper speech-to-text, Groq LLM).
+# Start the agent first: ../models/agent-project/run_local_speech.sh
+#   docker compose -f docker-compose.yml -f docker-compose.local-speech.yml up -d frontend
+services:
+  frontend:
+    environment:
+      AGENT_UPSTREAM: http://host.docker.internal:8100
+    depends_on: !reset [backend]
+  agent:
+    profiles: ["disabled"]
