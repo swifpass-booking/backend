@@ -1,5 +1,6 @@
 import functools
 import re
+from datetime import timedelta
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
@@ -13,7 +14,7 @@ from django.views.decorators.http import require_http_methods
 from swiftpass.http import error, parse_body
 
 from . import authz
-from .jwt import decode_user, issue_token
+from .jwt import clear_session_cookie, decode_user, issue_token, request_token, set_session_cookie
 from .models import User
 from .throttle import throttle
 
@@ -37,8 +38,7 @@ def _login_key(request):
 def require_auth(view):
     @functools.wraps(view)
     def wrapped(request, *args, **kwargs):
-        header = request.headers.get("Authorization", "")
-        token = header[7:] if header.startswith("Bearer ") else None
+        token, _ = request_token(request)
         if not token:
             return error(401, "unauthorised", "Sign in required.")
         user = decode_user(token)
@@ -123,7 +123,7 @@ def register(request):
         return error(409, "idempotency_conflict", "An account with that email or phone already exists.")
 
     token = issue_token(user)
-    return JsonResponse({"token": token, "user": user.to_public_dict()}, status=201)
+    return set_session_cookie(JsonResponse({"token": token, "user": user.to_public_dict()}, status=201), token)
 
 
 @csrf_exempt
@@ -144,7 +144,7 @@ def login(request):
         return error(401, "unauthorised", "Incorrect email/phone or password.")
 
     token = issue_token(user)
-    return JsonResponse({"token": token, "user": user.to_public_dict()})
+    return set_session_cookie(JsonResponse({"token": token, "user": user.to_public_dict()}), token)
 
 
 @csrf_exempt
@@ -153,7 +153,16 @@ def login(request):
 def logout(request):
     """Revokes every token issued to this user so far."""
     User.objects.filter(id=request.user_id).update(token_version=F("token_version") + 1)
-    return JsonResponse({"ok": True})
+    return clear_session_cookie(JsonResponse({"ok": True}))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_auth
+def agent_token(request):
+    """A 10-minute bearer token for the voice agent, which calls this API on the traveller's behalf.
+    The browser never holds the long-lived session token: that one is an httpOnly cookie."""
+    return JsonResponse({"token": issue_token(request.auth_user, ttl=timedelta(minutes=10))})
 
 
 @require_http_methods(["GET"])
