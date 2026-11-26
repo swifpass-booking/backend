@@ -7,7 +7,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from accounts.jwt import decode_user
+from accounts.jwt import decode_user, request_token
 from accounts.throttle import throttle
 from catalog.models import InventoryZone, Occurrence
 from swiftpass.http import error, parse_body
@@ -21,13 +21,14 @@ def require_owner(view):
 
     @functools.wraps(view)
     def wrapped(request, *args, **kwargs):
-        header = request.headers.get("Authorization", "")
+        token, via_cookie = request_token(request)
         request.user_id = None
-        if header.startswith("Bearer "):
-            user = decode_user(header[7:])
-            if not user:
+        if token:
+            user = decode_user(token)
+            if user:
+                request.user_id = user.id
+            elif not via_cookie:  # a stale cookie just means "guest"; a stale Bearer token is an error
                 return error(401, "unauthorised", "Session expired — sign in again.")
-            request.user_id = user.id
         key = request.headers.get("X-Guest-Key", "").strip()
         request.guest_key = key if 16 <= len(key) <= 64 else ""
         if not request.user_id and not request.guest_key:

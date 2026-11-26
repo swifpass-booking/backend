@@ -184,10 +184,10 @@ def tracking(request, occurrence_id):
 
     if request.method == "POST":
         from accounts import authz
-        from accounts.jwt import decode_token
+        from accounts.jwt import decode_token, request_token
 
-        header = request.headers.get("Authorization", "")
-        user_id = decode_token(header[7:]) if header.startswith("Bearer ") else None
+        token, _ = request_token(request)
+        user_id = decode_token(token) if token else None
         if not user_id or not authz.can_track(user_id, occ.id):
             return error(403, "forbidden", "Only operator staff can report vehicle positions.")
         body = parse_body(request) or {}

@@ -11,7 +11,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from accounts.jwt import decode_user
+from accounts.jwt import decode_user, request_token
 from accounts.models import User
 from accounts.throttle import throttle
 from accounts.views import is_valid_email, is_valid_phone
@@ -90,8 +90,7 @@ def clean_passport(raw, departs_at):
 
 
 def optional_user(request):
-    header = request.headers.get("Authorization", "")
-    token = header[7:] if header.startswith("Bearer ") else None
+    token, _ = request_token(request)
     if not token:
         return None
     return decode_user(token)
