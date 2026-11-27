@@ -78,7 +78,7 @@ services:
     build:
       context: ../frontend
       args:
-        VITE_DEMO_CARD: "1"  # this preview's backend runs in demo mode, so show the card form
+        NEXT_PUBLIC_DEMO_CARD: "1"  # this preview's backend runs in demo mode, so show the card form
     depends_on: [backend, agent]
     ports:
       - "8088:80"
